@@ -293,7 +293,33 @@ struct SourceEntry {
 namespace {
 
 struct ResourceProgram {
-    explicit ResourceProgram(const RecompileRequest& request, ShaderPreparationContext* preparation = nullptr) : program(std::make_unique<IrProgram>(PrepareResourceProgram(request, preparation))), plan(std::make_shared<const IrResourcePlan>(ResourceMaterializer{}.ExtractPlan(*program))) {}
+    explicit ResourceProgram(const RecompileRequest& request, ShaderPreparationContext* preparation = nullptr) : program(std::make_unique<IrProgram>(PrepareResourceProgram(request, preparation))) {
+        // The cached source program keeps every value the passes allocated (detached identities,
+        // folded and eliminated instructions). Release the unreachable ones before the plan is
+        // extracted; the SSA construction tables are complete and only SsaBuilder reads them.
+        static const bool reclaim = std::getenv("APS5_NO_IR_RECLAIM") == nullptr;
+        if (reclaim) {
+            const auto clearRegisterState = [](const auto& storage) {
+                for (const auto& block : storage) {
+                    block->ssaScalarValues.fill(nullptr);
+                    block->ssaVectorValues.fill(nullptr);
+                    block->ssaThreadBitScalarValues.fill(nullptr);
+                    block->ssaScalarMaskTags.fill(nullptr);
+                }
+            };
+            clearRegisterState(program->Blocks());
+            clearRegisterState(program->Resources().blockStorage);
+            std::size_t bytes = 0;
+            const auto removed = program->ReclaimUnusedValues(&bytes);
+            static std::atomic<std::uint64_t> totalValues{0}, totalBytes{0}, programs{0};
+            const auto values = totalValues.fetch_add(removed, std::memory_order_relaxed) + removed;
+            const auto released = totalBytes.fetch_add(bytes, std::memory_order_relaxed) + bytes;
+            const auto count = programs.fetch_add(1, std::memory_order_relaxed) + 1;
+            static const bool trace = std::getenv("APS5_TRACE_IR_RECLAIM") != nullptr;
+            if (trace) std::fprintf(stderr, "[ir-reclaim] shader=0x%llx released_values=%zu released_bytes=%zu | total programs=%llu values=%llu bytes=%llu\n", static_cast<unsigned long long>(request.shader.codeAddress), removed, bytes, static_cast<unsigned long long>(count), static_cast<unsigned long long>(values), static_cast<unsigned long long>(released));
+        }
+        plan = std::make_shared<const IrResourcePlan>(ResourceMaterializer{}.ExtractPlan(*program));
+    }
 
     std::unique_ptr<IrProgram> program;
     std::shared_ptr<const IrResourcePlan> plan;
@@ -416,6 +442,7 @@ CompiledVariant compileVariant(const RecompileRequest& request, IrProgram progra
     result.spirv = spirvEmitter.Emit(program, inputInfo, bindings, targetOptions);
 
     result.bdaAbiVersion = program.Info().usesDma || program.Info().usesFaultBuffer ? request.target.bdaAbiVersion : 0u;
+    result.bdaWrites = result.bdaAbiVersion != 0u && program.Info().bdaWrites;
     result.memoryOffsetDword = bindings.layout.memoryOffsetDword;
     result.shaderDataDwords = bindings.layout.ShaderDataDwords();
     result.imageMetadataDword = bindings.layout.ImageMetadataDword();
@@ -709,6 +736,7 @@ RecompileResult materializeResult(const CompiledVariant& variant, const Recompil
         .runtimeImageResources = artifact.runtimeImageResources,
         .bdaAbiVersion = artifact.bdaAbiVersion,
         .runtimeAbiVersion = artifact.runtimeAbiVersion,
+        .bdaWrites = artifact.bdaWrites,
         .vertexInputs = artifact.vertexInputs,
         .vertexOffsetSgpr = artifact.vertexOffsetSgpr,
         .instanceOffsetSgpr = artifact.instanceOffsetSgpr,

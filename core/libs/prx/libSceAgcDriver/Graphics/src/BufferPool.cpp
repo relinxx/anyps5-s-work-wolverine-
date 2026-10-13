@@ -26,11 +26,21 @@ bool exactSizes() {
 
 constexpr VkBufferUsageFlags deviceUsage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 
+VkDeviceSize hostRetentionBudget() {
+    const char* text = std::getenv("APS5_HOST_BUFFER_POOL_MIB");
+    if (text == nullptr) return VkDeviceSize{512} << 20u;
+    char* end = nullptr;
+    const auto mib = std::strtoull(text, &end, 10);
+    Require(end != text && *end == '\0' && mib <= 4096 && text[0] != '-',
+            "APS5_HOST_BUFFER_POOL_MIB must be 0 to 4096");
+    return static_cast<VkDeviceSize>(mib) << 20u;
 }
 
-BufferPool::BufferPool(const Context& context) : device(context.device), unmap(context.Function<PFN_vkUnmapMemory>("vkUnmapMemory")), destroyBuffer(context.Function<PFN_vkDestroyBuffer>("vkDestroyBuffer")), freeMemory(context.Function<PFN_vkFreeMemory>("vkFreeMemory")), allocateMemory(context.Function<PFN_vkAllocateMemory>("vkAllocateMemory")), mapMemory(context.Function<PFN_vkMapMemory>("vkMapMemory")), maxSlots(std::max<std::size_t>(1, std::min<std::size_t>(MaxSlots(), context.limits.maxMemoryAllocationCount / 6u))) {
+}
+
+BufferPool::BufferPool(const Context& context) : device(context.device), unmap(context.Function<PFN_vkUnmapMemory>("vkUnmapMemory")), destroyBuffer(context.Function<PFN_vkDestroyBuffer>("vkDestroyBuffer")), freeMemory(context.Function<PFN_vkFreeMemory>("vkFreeMemory")), allocateMemory(context.Function<PFN_vkAllocateMemory>("vkAllocateMemory")), mapMemory(context.Function<PFN_vkMapMemory>("vkMapMemory")), maxSlots(std::max<std::size_t>(1, std::min<std::size_t>(MaxSlots(), context.limits.maxMemoryAllocationCount / 6u))), vram(context) {
     smallTier.budget = smallBudget;
-    largeTier.budget = budget;
+    largeTier.budget = hostRetentionBudget();
     deviceTier.budget = DeviceTierEnabled() ? DeviceBudget(context.memory) : 0;
 }
 
@@ -209,6 +219,10 @@ std::optional<BufferAllocation> BufferPool::Take(std::size_t bytes, VkBufferUsag
         if (now - lastReport > std::chrono::seconds(10)) {
             lastReport = now;
             AgcDriver::ProfilePrint_nid_no_patch("[bufferpool] small: %llu hits, %llu misses, %llu evictions, %zu retained (%.0f MiB); large: %llu hits, %llu misses, %llu evictions, %zu retained (%.0f MiB)%s; device: %llu hits, %llu misses, %llu evictions, %zu retained (%.0f MiB of %llu)\n", static_cast<unsigned long long>(smallTier.hits), static_cast<unsigned long long>(smallTier.misses), static_cast<unsigned long long>(smallTier.evictions), smallTier.slots, smallTier.retainedBytes / 1048576.0, static_cast<unsigned long long>(largeTier.hits), static_cast<unsigned long long>(largeTier.misses), static_cast<unsigned long long>(largeTier.evictions), largeTier.slots, largeTier.retainedBytes / 1048576.0, sharedTiers() ? " (shared)" : "", static_cast<unsigned long long>(deviceTier.hits), static_cast<unsigned long long>(deviceTier.misses), static_cast<unsigned long long>(deviceTier.evictions), deviceTier.slots, deviceTier.retainedBytes / 1048576.0, static_cast<unsigned long long>(deviceTier.budget >> 20u));
+            if (vram.Enabled()) {
+                const auto report = vram.Report();
+                AgcDriver::ProfilePrint_nid_no_patch("[vram] heap %u: budget %llu MiB, usage %llu MiB, target %llu MiB; %llu released device buffers (%.0f MiB) not pooled over the target\n", report.heap, static_cast<unsigned long long>(report.budget >> 20u), static_cast<unsigned long long>(report.usage >> 20u), static_cast<unsigned long long>(report.target >> 20u), static_cast<unsigned long long>(vramDropped), vramDroppedBytes / 1048576.0);
+            }
         }
     }
     auto& tier = tierFor(capacity, properties);
@@ -256,11 +270,22 @@ void BufferPool::Put(const BufferAllocation& allocation) noexcept {
     // may throw on growth; a Put that cannot retain simply destroys, as noexcept requires.
     std::vector<BufferAllocation> evicted;
     bool live = true;
+    VkDeviceSize excess = 0;
     try {
+        if (DeviceTiered(allocation.properties)) excess = vram.Excess();
         std::lock_guard lock(mutex);
         live = !retired;
         auto& tier = tierFor(allocation.bytes, allocation.properties);
-        if (!live || allocation.allocationBytes > tier.budget) {
+        if (live && excess != 0 && &tier == &deviceTier) {
+            auto dropped = allocation.allocationBytes;
+            while (tier.slots != 0 && dropped < excess) {
+                evictOldest(tier, evicted);
+                dropped += evicted.back().allocationBytes;
+            }
+            evicted.push_back(allocation);
+            vramDropped += evicted.size();
+            vramDroppedBytes += dropped;
+        } else if (!live || allocation.allocationBytes > tier.budget) {
             evicted.push_back(allocation);
         } else {
             while (tier.slots != 0 && (tier.retainedBytes + allocation.allocationBytes > tier.budget || tier.slots >= maxSlots)) evictOldest(tier, evicted);
@@ -271,7 +296,12 @@ void BufferPool::Put(const BufferAllocation& allocation) noexcept {
     } catch (...) {
         destroy(allocation, live);
     }
-    for (const auto& gone : evicted) destroy(gone, live);
+    VkDeviceSize freed = 0;
+    for (const auto& gone : evicted) {
+        destroy(gone, live);
+        if (live) freed += gone.allocationBytes;
+    }
+    if (excess != 0) vram.Released(freed);
 }
 
 VkDeviceSize BufferPool::Trim() noexcept {

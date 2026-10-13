@@ -2,6 +2,7 @@
 #define CORE_LIBS_PRX_LIBSCEAGCDRIVER_GRAPHICS_INCLUDE_BUFFERPOOL_HPP
 
 #include "prx/libSceAgcDriver/Graphics/include/Context.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/VramBudget.hpp"
 #include <cstdint>
 #include <deque>
 #include <memory>
@@ -76,6 +77,7 @@ public:
     SlabSlot TakeSlot(const Context& context, std::uint32_t memoryType, std::size_t capacity, bool addressable);
     void PutSlot(VkDeviceMemory memory, VkDeviceSize offset) noexcept;
     std::size_t SlabBlocks();
+    VramBudget& Vram() { return vram; }
 
 private:
     struct SlabBlock {
@@ -150,10 +152,14 @@ private:
     Tier largeTier;
     Tier deviceTier;
     std::uint64_t clock = 0;
+    VramBudget vram;
+    std::uint64_t vramDropped = 0;
+    VkDeviceSize vramDroppedBytes = 0;
     std::mutex slabMutex;
     std::unordered_map<std::uint64_t, Slab> slabs;
     std::unordered_map<VkDeviceMemory, std::unique_ptr<SlabBlock>> slabBlocks;
-    static constexpr VkDeviceSize budget = 512ull * 1024 * 1024;
+    // APS5_HOST_BUFFER_POOL_MIB bounds released large host-visible buffers (default 512 MiB).
+    // Zero disables retention in this tier, without changing live allocations or memory types.
     // The small tier's own budget (slots of at most half a MiB each): pinned host memory the large
     // tier's budget does not count.
     static constexpr VkDeviceSize smallBudget = 64ull * 1024 * 1024;

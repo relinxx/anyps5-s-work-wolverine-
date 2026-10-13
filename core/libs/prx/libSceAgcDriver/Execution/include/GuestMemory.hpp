@@ -115,6 +115,9 @@ std::uint64_t CollectWritesUncached(std::uint64_t address, std::size_t bytes);
 // tracker mutex, so every collect that bumped before it has finished its walk and every later
 // collect stamps newer.
 std::uint64_t TrackerGeneration();
+// Clears pre-registration write-watch state for the range and returns a generation snapshot while
+// holding the tracker lock across both operations. Used for per-allocation CPU-write baselines.
+bool ResetWriteWatchAndGetGeneration(std::uint64_t address, std::size_t bytes, std::uint32_t& generation);
 // Whether no CPU write touched the range since `generation`: an uncached resetting collect of the
 // range's pages first (a game store not collected yet becomes a block stamp), then the compare over
 // the stamps collects make (dirty pages), not the MarkWritten stamps of the driver's own GPU label
@@ -130,6 +133,12 @@ constexpr std::uint8_t BlockUnchanged = 0;
 constexpr std::uint8_t BlockWritten = 1;
 constexpr std::uint8_t BlockMaybeWritten = 2;
 bool ChangedBlocks(std::uint64_t address, std::size_t bytes, std::span<const std::uint64_t> generations, std::span<std::uint8_t> changed, std::span<std::uint8_t> cpu = {});
+// Counts CPU-stamped 64 KiB blocks newer than `generation` without collecting or resetting
+// write-watch state. Returns false when write-watch does not cover the range.
+bool CountCpuWrittenBlocksSince(std::uint64_t address, std::size_t bytes, std::uint32_t generation, std::uint64_t& count);
+// Fills one byte per intersecting 64 KiB block: 1 if a CPU store was collected after
+// `generation`, 0 otherwise. Does not collect/reset write-watch state.
+bool CpuWrittenBlocksSince(std::uint64_t address, std::size_t bytes, std::uint32_t generation, std::span<std::uint8_t> written);
 void SetImageRange(std::uintptr_t base, std::size_t bytes);
 // Where no guest arena exists (Linux), the range whose page states Accessible/CheckRange cache, as they cache the
 // arena's (set before guest memory is first checked; the frame replay names its captured address space). A host that
@@ -171,6 +180,7 @@ GpuMutexType& GpuMutex();
 // work the hold deferred to run without it (the recorder's release of the objects completed batches
 // kept). One hook, set once; it must not take GpuMutex itself.
 void SetGpuUnlockHook(void (*hook)());
+std::uint64_t GpuHoldSerial();
 // Debug aid (APS5_ASSERT_GPU_LOCK=1): aborts with a [lock] line naming `where` when the calling
 // thread does not hold GpuMutex. Recording, submits, command batches and the detiler's pools must
 // only be reached under it (a resource build's stage A runs without it, see ShaderResources).

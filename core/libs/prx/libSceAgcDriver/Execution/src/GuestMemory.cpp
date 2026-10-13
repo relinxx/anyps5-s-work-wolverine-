@@ -1794,6 +1794,29 @@ std::uint64_t TrackerGeneration() {
     return tracker.generation;
 }
 
+bool ResetWriteWatchAndGetGeneration(std::uint64_t address, std::size_t bytes, std::uint32_t& generation) {
+    generation = 0;
+    if (bytes == 0 || bytes > std::numeric_limits<std::uint64_t>::max() - address) return false;
+    constexpr std::uint64_t page = 4096;
+    const auto end = address + bytes;
+    if (end > std::numeric_limits<std::uint64_t>::max() - (page - 1)) return false;
+    const auto first = address & ~(page - 1);
+    const auto stop = (end + page - 1) & ~(page - 1);
+
+    auto& tracker = Tracker();
+    const auto lock = lockTracker(tracker);
+    tracker.initialize();
+    if (!tracker.watched || !tracker.covers(first, static_cast<std::size_t>(stop - first))) return false;
+
+    // walkWrites performs the platform's resetting write-watch collection (GetWriteWatch with
+    // RESET on Windows) and stamps any pre-registration writes before returning. Holding the same
+    // tracker lock through the generation read makes this a single baseline boundary: writes that
+    // are collected here are at/before registration, and writes collected later get newer stamps.
+    if (!walkWrites(tracker, first, stop, StampKind::Cpu)) return false;
+    generation = static_cast<std::uint32_t>(tracker.generation);
+    return true;
+}
+
 bool UnchangedSinceCollected(std::uint64_t address, std::size_t bytes, std::uint64_t generation) {
     if (CollectWritesUncached(address, bytes) == 0) return false;
     auto& tracker = Tracker();
@@ -1845,6 +1868,41 @@ bool ChangedBlocks(std::uint64_t address, std::size_t bytes, std::span<const std
         const auto generation = generations[k];
         changed[k] = generation == 0 || tracker.writtenStampOf(block) > generation ? BlockWritten : tracker.stampOf(block) > generation ? BlockMaybeWritten : BlockUnchanged;
         if (k < cpu.size()) cpu[k] = generation == 0 || tracker.cpuStampOf(block) > generation ? 1 : 0;
+    }
+    return true;
+}
+
+bool CountCpuWrittenBlocksSince(std::uint64_t address, std::size_t bytes, std::uint32_t generation, std::uint64_t& count) {
+    count = 0;
+    auto& tracker = Tracker();
+    const auto lock = lockTracker(tracker);
+    tracker.initialize();
+    if (!tracker.watched || bytes == 0 || !tracker.covers(address, bytes)) return false;
+    const auto first = tracker.blockOf(address);
+    const auto last = tracker.blockOf(address + bytes - 1);
+    for (auto block = first; block <= last; ++block) {
+        const auto stamp = tracker.cpuStampOf(block);
+        // Generations are 32-bit stamps. Modular subtraction handles one wrap as long as
+        // the census interval is shorter than half the generation space.
+        if (static_cast<std::uint32_t>(stamp - generation) < 0x80000000u && stamp != generation) ++count;
+    }
+    return true;
+}
+
+bool CpuWrittenBlocksSince(std::uint64_t address, std::size_t bytes, std::uint32_t generation, std::span<std::uint8_t> written) {
+    std::fill(written.begin(), written.end(), std::uint8_t{0});
+    if (bytes == 0 || bytes > std::numeric_limits<std::uint64_t>::max() - address) return false;
+    auto& tracker = Tracker();
+    const auto lock = lockTracker(tracker);
+    tracker.initialize();
+    if (!tracker.watched || !tracker.covers(address, bytes)) return false;
+    const auto first = tracker.blockOf(address);
+    const auto last = tracker.blockOf(address + bytes - 1);
+    if (last - first + 1 > written.size()) return false;
+    for (auto block = first; block <= last; ++block) {
+        const auto stamp = tracker.cpuStampOf(block);
+        written[static_cast<std::size_t>(block - first)] =
+            static_cast<std::uint32_t>(stamp - generation) < 0x80000000u && stamp != generation ? 1u : 0u;
     }
     return true;
 }
@@ -2028,11 +2086,13 @@ const void* ThreadToken() {
     thread_local char token;
     return &token;
 }
+
+std::atomic<std::uint64_t> gpuHoldSerial{0};
 }
 
 void GpuMutexType::acquired() {
     owner.store(ThreadToken(), std::memory_order_relaxed);
-    ++depth;
+    if (++depth == 1) gpuHoldSerial.fetch_add(1, std::memory_order_relaxed);
 }
 
 bool GpuMutexType::try_lock() {
@@ -2061,6 +2121,10 @@ std::atomic<void (*)()> gpuUnlockHook{nullptr};
 
 void SetGpuUnlockHook(void (*hook)()) {
     gpuUnlockHook.store(hook, std::memory_order_release);
+}
+
+std::uint64_t GpuHoldSerial() {
+    return gpuHoldSerial.load(std::memory_order_relaxed);
 }
 
 void GpuMutexType::unlock() {

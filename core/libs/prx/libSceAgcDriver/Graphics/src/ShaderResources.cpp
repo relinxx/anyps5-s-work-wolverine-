@@ -5,6 +5,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ShaderResources.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/MemoryLedger.hpp"
 #include <algorithm>
 #include <atomic>
 #include <bit>
@@ -193,6 +194,7 @@ std::list<CachedTexture>::iterator findTexture(TextureCache& cache, const Textur
 }
 
 void eraseTexture(TextureCache& cache, std::list<CachedTexture>::iterator it) {
+    MemoryLedger::AddTextureSnapshotBytes(-static_cast<std::int64_t>(it->bytes.size()));
     cache.bytes -= it->accounted;
     if (it->source != nullptr) {
         for (auto [view, last] = cache.views.equal_range(it->source.get()); view != last; ++view) {
@@ -266,6 +268,7 @@ bool admitTexture(TextureCache& cache, const TextureKey& key, std::uint64_t inco
 }
 
 void reportCacheCounts(TextureCache& cache, std::uint64_t budget) {
+    MemoryLedger::Report();
     static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
     if (!profile) return;
     const auto now = std::chrono::steady_clock::now();
@@ -688,6 +691,7 @@ std::shared_ptr<Texture> cachedTexture(const Context& context, std::span<const s
     ++cache.counts.inserted;
     logLookup({texture.get(), resource, guestBytes, *keys, generation, source.get()});
     cache.entries.push_front(std::move(entry));
+    MemoryLedger::AddTextureSnapshotBytes(static_cast<std::int64_t>(cache.entries.front().bytes.size()));
     cache.index[key] = cache.entries.begin();
     if (source != nullptr) cache.views.emplace(source.get(), cache.entries.begin());
     reportCacheCounts(cache, budget);
@@ -4044,6 +4048,10 @@ void ShaderResources::WriteBackBuffers() {
     if (bda) bda->CheckFault();
     if (SkipWriteBack()) return;
     guestMemory.WriteBack();
+}
+
+void ShaderResources::FinishBoundedHeapWriteBack(Recorder& recorder) {
+    guestMemory.FinishBoundedWriteBack(recorder);
 }
 
 bool ShaderResources::ReadsOverlap(std::uint64_t address, std::size_t bytes) const {

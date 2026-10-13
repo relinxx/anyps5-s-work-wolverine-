@@ -1750,6 +1750,7 @@ void traceKeyStore(const char* path, const GuestTextureResource& descriptor, std
 }
 
 void StorageTexture::captureGuestBytes(const std::vector<bool>* layers) {
+    original.resize(static_cast<std::size_t>(guestBytes));
     comparedGuestBytes = {};
     const bool complete = layers == nullptr || std::all_of(layers->begin(), layers->end(), [](bool selected) { return selected; });
     for (std::uint32_t layer = 0; layer < trackedLayers; ++layer) {
@@ -1819,7 +1820,6 @@ void StorageTexture::upload(const std::vector<bool>* layers) {
     const auto start = profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     const auto elementBytes = BytesPerElement(descriptor.format);
     const auto linearBytes = sliceLinearBytes * arrayLayers;
-    original.resize(static_cast<std::size_t>(guestBytes));
     // A layer selection applies to the direct path alone (the others upload everything); it names
     // array layers, which the tracked layers are when there are several.
     if (layers != nullptr && ((!blockUnits && trackedLayers != arrayLayers) || std::all_of(layers->begin(), layers->end(), [](bool selected) { return selected; }))) layers = nullptr;
@@ -2028,6 +2028,7 @@ void StorageTexture::upload(const std::vector<bool>* layers) {
         return;
     }
     originalValid = true;
+    original.resize(static_cast<std::size_t>(guestBytes));
     forgetBorrowed(0, trackedLayers);
     stampLayers(false);
     GuestMemory::ReadCommitted(descriptor.baseAddress, original);
@@ -4114,6 +4115,7 @@ void StorageTexture::writeBackLayers(const std::vector<bool>& layers) {
     // stale unit (dropped, or kept for the CPU) still differs from them, so `original` vouches for
     // the content again only where it did before, or once every unit is stored.
     const bool wasValid = originalValid;
+    original.resize(static_cast<std::size_t>(guestBytes));
     if (!wasValid) GuestMemory::ReadCommitted(descriptor.baseAddress, original);
     DeviceBuffer linear(context, static_cast<std::size_t>(sliceLinearBytes * arrayLayers), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
     DeviceBuffer tiled(context, original.size(), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);

@@ -51,6 +51,7 @@ public:
     // layouts come from the module's own bindings. The seconds vkCreateComputePipelines took (agc_dispatch_run
     // --compile-only measures the host driver's compile of a large program this way).
     double CompileComputePipeline(const ShaderRecompiler::RecompileResult& shader, bool optimize);
+    void DumpComputePipelineInputs(const ShaderRecompiler::RecompileResult& shader, std::uint64_t address, const std::string& path);
     // Creates the pipeline APS5_DUMP_PIPELINE_DIR wrote at `path` (its SPIR-V, set layout, specialization and flags,
     // as the dispatch would) through the device's pipeline cache, which the teardown saves; the seconds it took.
     double CompileDumpedPipeline(const std::string& path);

@@ -1,4 +1,5 @@
 #include "prx/libSceAgcDriver/Graphics/include/ShaderResources.hpp"
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 
@@ -26,6 +27,7 @@ void ShaderResources::prepareAddressBindings(std::span<const CompiledShader> sha
         Require(context.bufferDeviceAddress, "buffer device address is not enabled");
         static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
         guestMemory.AcquireRegistered();
+        if (std::any_of(shaders.begin(), shaders.end(), [](const CompiledShader& shader) { return shader.program->bdaWrites; })) guestMemory.AddAddressWritableMirrors();
         const auto snapshotsStart = profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
         for (const auto& snapshot : snapshots) guestMemory.AddSnapshot(snapshot);
         if (profile) GuestBufferMemory::CountAddressBuild(std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - snapshotsStart).count());

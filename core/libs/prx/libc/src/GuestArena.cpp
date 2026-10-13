@@ -352,6 +352,59 @@ void* GuestArenaMapAlias_nid_postfix(std::uintptr_t address, std::size_t bytes) 
 void GuestArenaUnmapAlias_nid_postfix(void* alias) {
     WindowsMappings::Get().UnmapAlias(alias);
 }
+
+namespace {
+std::recursive_mutex& WorkingSetMutex() {
+    static std::recursive_mutex mutex;
+    return mutex;
+}
+
+struct BackingFiles {
+    std::mutex mutex;
+    std::vector<HANDLE> files;
+};
+
+BackingFiles& Backing() {
+    static BackingFiles backing;
+    return backing;
+}
+}
+
+void GuestArenaWorkingSetLock_nid_postfix() {
+    WorkingSetMutex().lock();
+}
+
+void GuestArenaWorkingSetUnlock_nid_postfix() {
+    WorkingSetMutex().unlock();
+}
+
+void GuestArenaRegisterBackingFile_nid_postfix(void* file) {
+    if (file == nullptr || file == INVALID_HANDLE_VALUE) return;
+    auto& backing = Backing();
+    std::lock_guard lock(backing.mutex);
+    backing.files.push_back(static_cast<HANDLE>(file));
+}
+
+void GuestArenaUnregisterBackingFile_nid_postfix(void* file) {
+    auto& backing = Backing();
+    std::lock_guard lock(backing.mutex);
+    std::erase(backing.files, static_cast<HANDLE>(file));
+}
+
+void GuestArenaBackingFileBytes_nid_postfix(std::uint64_t* logical, std::uint64_t* allocated, std::uint32_t* files) {
+    std::uint64_t logicalSum = 0, allocatedSum = 0;
+    auto& backing = Backing();
+    std::lock_guard lock(backing.mutex);
+    for (const auto file : backing.files) {
+        FILE_STANDARD_INFO info{};
+        if (!GetFileInformationByHandleEx(file, FileStandardInfo, &info, sizeof(info))) continue;
+        logicalSum += static_cast<std::uint64_t>(info.EndOfFile.QuadPart);
+        allocatedSum += static_cast<std::uint64_t>(info.AllocationSize.QuadPart);
+    }
+    if (logical != nullptr) *logical = logicalSum;
+    if (allocated != nullptr) *allocated = allocatedSum;
+    if (files != nullptr) *files = static_cast<std::uint32_t>(backing.files.size());
+}
 #endif
 
 #if defined(__linux__)

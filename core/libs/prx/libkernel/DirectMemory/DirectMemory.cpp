@@ -3,6 +3,7 @@
 #include "prx/libc/include/GuestArena.hpp"
 #include "prx/libc/include/GuestWriteWatch.hpp"
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <iterator>
 #include <map>
@@ -30,6 +31,7 @@
 #include <vector>
 #else
 #include <windows.h>
+#include <winioctl.h>
 
 static constexpr int PROT_NONE = 0;
 static constexpr int PROT_READ = 1;
@@ -263,19 +265,60 @@ void ZeroReusedPhysical(std::uint64_t start, std::size_t bytes) {
 }
 #endif
 
+#ifdef _WIN32
+HANDLE SparseDirectBacking(std::uint64_t bytes, std::uint64_t start, HANDLE& fileOwner) {
+    std::vector<wchar_t> directory(32768);
+    const auto length = GetTempPathW(static_cast<DWORD>(directory.size()), directory.data());
+    if (length == 0 || length >= directory.size()) throw std::system_error(static_cast<int>(GetLastError()), std::system_category(), "locate sparse direct memory directory");
+    static std::atomic<std::uint64_t> serial{0};
+    for (unsigned attempt = 0; attempt < 16; ++attempt) {
+        const auto path = std::wstring(directory.data(), length) + L"anyps5-dmem-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()) + L"-" + std::to_wstring(serial.fetch_add(1)) + L".tmp";
+        const auto file = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE | FILE_FLAG_RANDOM_ACCESS, nullptr);
+        if (file == INVALID_HANDLE_VALUE) {
+            if (GetLastError() == ERROR_FILE_EXISTS || GetLastError() == ERROR_ALREADY_EXISTS) continue;
+            throw std::system_error(static_cast<int>(GetLastError()), std::system_category(), "create sparse direct memory file");
+        }
+        DWORD returned = 0;
+        if (!DeviceIoControl(file, FSCTL_SET_SPARSE, nullptr, 0, nullptr, 0, &returned, nullptr)) {
+            const auto error = GetLastError();
+            CloseHandle(file);
+            throw std::system_error(static_cast<int>(error), std::system_category(), "enable sparse direct memory backing");
+        }
+        const auto section = CreateFileMappingW(file, nullptr, PAGE_EXECUTE_READWRITE, static_cast<DWORD>(bytes >> 32), static_cast<DWORD>(bytes), nullptr);
+        const auto error = GetLastError();
+        FILE_STANDARD_INFO info{};
+        const bool measured = GetFileInformationByHandleEx(file, FileStandardInfo, &info, sizeof(info)) != 0;
+        if (!section) {
+            CloseHandle(file);
+            throw std::system_error(static_cast<int>(error), std::system_category(), "map sparse direct memory backing");
+        }
+        // DELETE_ON_CLOSE belongs to the file handle, not the mapping handle. Keep
+        // that handle alive with the physical backing, including its mapped aliases.
+        fileOwner = file;
+        Trace("sparse physical backing phys=0x%llx logical_bytes=%llu allocated_bytes=%lld measured=%u delete_on_close=1 file_handle_retained=1", static_cast<unsigned long long>(start), static_cast<unsigned long long>(bytes), static_cast<long long>(info.AllocationSize.QuadPart), measured ? 1u : 0u);
+        return section;
+    }
+    throw std::runtime_error("cannot create a unique sparse direct memory file");
+}
+#endif
+
 class PhysicalBacking {
 public:
     PhysicalBacking(std::size_t bytes, int memoryType, std::uint64_t start) : start(start), bytes(bytes), memoryType(memoryType) {
 #ifdef _WIN32
-        static_cast<void>(start);
         const auto size = static_cast<std::uint64_t>(bytes);
-        section = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_EXECUTE_READWRITE, static_cast<DWORD>(size >> 32), static_cast<DWORD>(size), nullptr);
+        static const bool fileBacked = [] {
+            const auto* value = std::getenv("APS5_FILE_BACKED_DIRECT_MEMORY");
+            return value != nullptr && std::string_view(value) == "1";
+        }();
+        section = fileBacked ? SparseDirectBacking(size, start, sparseFile) : CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_EXECUTE_READWRITE, static_cast<DWORD>(size >> 32), static_cast<DWORD>(size), nullptr);
         if (!section) {
             const auto error = static_cast<int>(GetLastError());
             char message[96];
             std::snprintf(message, sizeof(message), "create direct memory backing of 0x%llx bytes (%llu MiB)", static_cast<unsigned long long>(size), static_cast<unsigned long long>((size + 0xFFFFF) >> 20));
             throw std::system_error(error, std::system_category(), message);
         }
+        if (sparseFile != nullptr) GuestArena::GuestArenaRegisterBackingFile_nid_postfix(sparseFile);
 #else
         file = PhysicalFile();
         fileOffset = start;
@@ -304,6 +347,10 @@ public:
     ~PhysicalBacking() {
 #ifdef _WIN32
         CloseHandle(section);
+        if (sparseFile != nullptr) {
+            GuestArena::GuestArenaUnregisterBackingFile_nid_postfix(sparseFile);
+            CloseHandle(sparseFile);
+        }
 #else
         if (hostWriteView != nullptr) ::munmap(hostWriteView, bytes);
 #endif
@@ -326,6 +373,7 @@ private:
     int memoryType;
 #ifdef _WIN32
     HANDLE section = nullptr;
+    HANDLE sparseFile = nullptr;
 #else
     int file = -1;
     void* hostWriteView = nullptr;

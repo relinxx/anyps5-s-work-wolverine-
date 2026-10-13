@@ -95,6 +95,23 @@ void CheckSharedBlock() {
     if (!Watched(outside, unwatched.size())) Require(StoredOver(outside, unwatched.size(), TrackerGeneration()), "an unwatched range reads as not stored over");
 }
 
+void CheckCumulativeCpuDirtyBitmap() {
+    void* memory = AllocateWatched(2 * Block);
+    const auto base = reinterpret_cast<std::uint64_t>(memory);
+    // Prepare contents before the registration baseline. The reset performed by the baseline
+    // discards setup writes; only the explicit store below belongs to the test interval.
+    std::memset(memory, 0, 2 * Block);
+    std::uint32_t registration = 0;
+    Require(ResetWriteWatchAndGetGeneration(base, 2 * Block, registration), "could not establish the registration write-watch baseline");
+    static_cast<volatile std::uint8_t*>(memory)[Block + 7] = 0x51;
+    CollectWritesUncached(base, 2 * Block);
+    std::array<std::uint8_t, 2> written{};
+    Require(CpuWrittenBlocksSince(base, 2 * Block, registration, written), "cumulative write-watch bitmap rejected a covered range");
+    Require(written[0] == 0 && written[1] == 1, "cumulative CPU dirty bitmap did not isolate the written 64 KiB block");
+    Require(static_cast<const std::uint8_t*>(memory)[0] == 0 && static_cast<const std::uint8_t*>(memory)[Block] == 0,
+        "the bitmap test did not retain an all-zero untouched block");
+}
+
 void CheckOwnStore() {
     void* memory = AllocateWatched(2 * Block);
     const auto base = reinterpret_cast<std::uint64_t>(memory);
@@ -308,6 +325,7 @@ int main() {
             return 77;
         }
         CheckSharedBlock();
+        CheckCumulativeCpuDirtyBitmap();
         CheckOwnStore();
         CheckUnwatch();
 #ifdef _WIN32

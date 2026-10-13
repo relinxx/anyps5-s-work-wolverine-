@@ -7,6 +7,11 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/ShaderPreparation.hpp"
 #include "prx/libSceAgcDriver/Submit/include/Acb.hpp"
+#include "prx/libc/include/GuestAllocations.hpp"
+#include "../NarrowConstantStoreFixture.hpp"
+#ifdef _WIN32
+#include <windows.h>
+#endif
 #include <spirv/unified1/spirv.hpp>
 #include <algorithm>
 #include <array>
@@ -471,6 +476,81 @@ void DeferredRegistration() {
     ExpectFailure([] { AgcDriverShutdown_nid_postfix(); }, "not statically resolvable");
 }
 
+void OnDemandRegistration(AgcDriver::VulkanDevice& device) {
+    using namespace NarrowConstantStoreFixture;
+    constexpr std::size_t bytes = 65536;
+    struct GuestBlock {
+        std::uint8_t* data;
+        GuestBlock() {
+#ifdef _WIN32
+            data = static_cast<std::uint8_t*>(VirtualAlloc(nullptr, bytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+#else
+            data = static_cast<std::uint8_t*>(std::aligned_alloc(bytes, bytes));
+#endif
+            Require(data != nullptr, "demand test cannot allocate guest output");
+            std::memset(data, Fill, bytes);
+            GuestAllocations::Mutation().Add(data, bytes, true, true, true);
+        }
+        ~GuestBlock() {
+            GuestAllocations::Mutation().Remove(data);
+#ifdef _WIN32
+            VirtualFree(data, 0, MEM_RELEASE);
+#else
+            std::free(data);
+#endif
+        }
+    } guest;
+    struct Header {
+        Shader shader{};
+        std::array<ShaderRegister, 8> registers{};
+        ShaderSpecialRegs specials{};
+    } header;
+    const auto address = reinterpret_cast<std::uintptr_t>(Code.data());
+    header.shader.file_header = 0x34333231u;
+    header.shader.version = 0x18;
+    header.shader.header_size = sizeof(header);
+    header.shader.shader_size = sizeof(Code);
+    header.shader.code = Code.data();
+    header.shader.sh_registers = header.registers.data();
+    header.shader.num_sh_registers = header.registers.size();
+    header.shader.specials = &header.specials;
+    header.specials.dispatch_modifier = 0x8000;
+    header.registers = {{{0x20c, static_cast<std::uint32_t>(address >> 8u)}, {0x20d, static_cast<std::uint32_t>(address >> 40u)}, {0x207, Threads}, {0x208, 1}, {0x209, 1}, {0x212, 0}, {0x213, 4}, {0x207, Threads}}};
+    AgcDriver::DriverDetail::ShaderSnapshot snapshot{address, reinterpret_cast<std::uintptr_t>(&header), 0, {Code.begin(), Code.end()}, {}};
+    snapshot.header.resize(sizeof(header));
+    std::memcpy(snapshot.header.data(), &header, sizeof(header));
+    // RegisterShaderSnapshot copies this shared preparation state, letting the
+    // test inspect publication without adding a testing accessor to the driver.
+    AgcDriver::DriverDetail::Driver::Get().RegisterShaderSnapshot(snapshot);
+    Require(snapshot.prepared->deferred && !snapshot.prepared->pending && snapshot.prepared->entries.empty(), "demand registration built or queued an unused artifact");
+    const auto output = reinterpret_cast<std::uintptr_t>(guest.data);
+    std::array<std::uint32_t, 2> users{static_cast<std::uint32_t>(output), static_cast<std::uint32_t>(output >> 32u)};
+    const ShaderRecompiler::ShaderComputeStageInfo compute{{Threads, 1, 1}, 0, {false, false, false}, false, 1, {}};
+    const std::array<ShaderRecompiler::MemoryRegion, 1> memory{{{address, std::as_bytes(std::span(snapshot.code))}}};
+    ShaderRecompiler::RecompileRequest request{{ShaderRecompiler::ShaderStage::Compute, address, snapshot.code, 0, {}}, {32, 0, users, compute, {}, {}, memory}, device.Target(), {0, 0, 0, 128}};
+    std::vector<std::future<std::shared_ptr<const ShaderRecompiler::SourceHandle>>> firstUses;
+    for (unsigned i = 0; i < 4; ++i) firstUses.push_back(std::async(std::launch::async, [&] { return AgcDriver::DriverDetail::SourceHandleFor(snapshot, 0, request); }));
+    const auto handle = firstUses.front().get();
+    for (std::size_t i = 1; i < firstUses.size(); ++i) Require(firstUses[i].get() == handle, "concurrent demand uses built different artifacts");
+    Require(snapshot.prepared->entries.size() == 1, "demand first use did not cache exactly one artifact");
+    const auto eager = ShaderRecompiler::PrepareShader(request);
+    Require(std::ranges::equal(ShaderRecompiler::GetPreparedArtifact(*handle).spirv, ShaderRecompiler::GetPreparedArtifact(*eager).spirv), "demand preparation changed SPIR-V");
+    const auto invocation = AgcDriver::DriverDetail::InvocationFor(snapshot, 0, request);
+    ShaderRecompiler::SrtRuntime runtime{};
+    runtime.userData = users;
+    const auto capture = invocation.Capture(runtime);
+    const auto result = invocation.Materialize(*capture);
+    device.Dispatch(*result, 1, 1, 1, {}, address);
+    device.WaitIdle();
+    for (std::size_t offset = 0; offset < bytes; ++offset) {
+        const auto expected = offset < Threads * LaneBytes ? ExpectedLane[offset % LaneBytes] : Fill;
+        Require(guest.data[offset] == expected, "demand first-use GPU store corrupted output or untouched bytes");
+    }
+    Require(AgcDriver::DriverDetail::SourceHandleFor(snapshot, 0, request) == handle, "repeated demand use rebuilt its artifact");
+    AgcDriverShutdown_nid_postfix();
+    std::puts("demand registration skips unused artifacts; concurrent first use, equivalent SPIR-V and real GPU stores passed");
+}
+
 void DeferredUndecodableRegistration() {
     alignas(256) std::array<std::uint32_t, 3> code{0xbe842104u, 0xf1949f05u, 0x00060018u};
     struct Header {
@@ -503,7 +583,13 @@ void DeferredUndecodableRegistration() {
 
 int main(int argc, char** argv) {
     try {
-        Require(argc == 1 || (argc == 2 && (std::string_view(argv[1]) == "--indirect" || std::string_view(argv[1]) == "--fail-before-registration" || std::string_view(argv[1]) == "--deferred" || std::string_view(argv[1]) == "--deferred-undecodable")), "invalid test arguments");
+        Require(argc == 1 || (argc == 2 && (std::string_view(argv[1]) == "--indirect" || std::string_view(argv[1]) == "--fail-before-registration" || std::string_view(argv[1]) == "--deferred" || std::string_view(argv[1]) == "--deferred-undecodable" || std::string_view(argv[1]) == "--on-demand")), "invalid test arguments");
+        if (argc == 2 && std::string_view(argv[1]) == "--on-demand") {
+            const auto device = OpenVulkanTestDevice();
+            if (!device) return VulkanTestSkipped;
+            OnDemandRegistration(*device);
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--deferred") {
             if (!OpenVulkanTestDevice()) return VulkanTestSkipped;
             DeferredRegistration();

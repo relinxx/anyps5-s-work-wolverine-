@@ -10,6 +10,8 @@
 #include "prx/libc/include/GuestArena.hpp"
 #include "ControlFlow/RequestSerializer.hpp"
 #include "Recompiler.hpp"
+#include "prx/libSceAgcDriver/Execution/include/InvocationCapture.hpp"
+#include "prx/libSceAgcDriver/Execution/include/InvocationDiskCache.hpp"
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -110,6 +112,7 @@ int main(int argc, char** argv) {
         bool useCache = false;
         // --compile-only [optimized|unoptimized]: recompile and time the host driver's pipeline compile, nothing else.
         std::string compileOnly;
+        std::string prepareExact;
         std::filesystem::path blobs;
         for (int i = 1; i < argc; ++i) {
             const std::string argument = argv[i];
@@ -128,6 +131,8 @@ int main(int argc, char** argv) {
                 dump.push_back(ParseRange(value()));
             } else if (argument == "--compile-only") {
                 compileOnly = value();
+            } else if (argument == "--prepare-exact") {
+                prepareExact = value();
             } else if (argument == "--compile-dump") {
                 // A pipeline APS5_DUMP_PIPELINE_DIR wrote: created into the pipeline cache (ANYPS5_SHADER_CACHE_DIR),
                 // saved when the device goes.
@@ -166,6 +171,26 @@ int main(int argc, char** argv) {
         if (path == nullptr) throw std::runtime_error("usage: agc_dispatch_run <shader_*.req> --groups X,Y,Z [--zero A:B]... [--poison A:B]... [--dump A:B]...");
         auto deserialized = ShaderRecompiler::RequestSerializer{}.Deserialize(ReadText(path));
         auto& request = deserialized.request;
+        if (!prepareExact.empty()) {
+            AgcDriver::InvocationCapture::RestoreAndVerify(path, request);
+            std::printf("exact invocation verified; materializing %zu code words and %zu live regions\n", request.shader.code.size(), request.context.memory.size());
+            std::fflush(stdout);
+            AgcDriver::VulkanDevice device;
+            const auto result = ShaderRecompiler::Recompile(request);
+            if (AgcDriver::InvocationDiskCache::Eligible(request)) {
+                const auto key = AgcDriver::InvocationDiskCache::Key(request);
+                const bool stored = AgcDriver::InvocationDiskCache::Store(key, result);
+                const auto cached = AgcDriver::InvocationDiskCache::Load(key);
+                std::vector<std::byte> before, after;
+                ShaderRecompiler::ShaderDiskCache::EncodeResult(result, before);
+                if (cached) ShaderRecompiler::ShaderDiskCache::EncodeResult(*cached, after);
+                if (!cached || before != after) throw std::runtime_error("offline invocation result cache verification failed");
+                std::printf("exact invocation result %s; full payload byte-verified\n", stored ? "stored" : "already stored");
+            }
+            device.DumpComputePipelineInputs(result, request.shader.codeAddress, prepareExact);
+            std::printf("offline pipeline inputs saved: %s (%zu SPIR-V words)\n", prepareExact.c_str(), result.spirv.size());
+            return 0;
+        }
         if (!request.context.compute.has_value()) throw std::runtime_error("the request is not a compute shader");
         if (!compileOnly.empty()) {
             AgcDriver::VulkanDevice device;

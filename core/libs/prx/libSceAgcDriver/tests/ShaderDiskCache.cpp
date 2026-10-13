@@ -56,6 +56,7 @@ void requireSameArtifact(const CompiledShaderArtifact& left, const CompiledShade
     const std::string prefix = std::string(what) + ": ";
     require(left.spirv.Words() == right.spirv.Words(), prefix + "SPIR-V differs");
     require(left.bdaAbiVersion == right.bdaAbiVersion, prefix + "BDA ABI version differs");
+    require(left.bdaWrites == right.bdaWrites, prefix + "BDA write flag differs");
     require(left.runtimeAbiVersion == right.runtimeAbiVersion, prefix + "runtime ABI version differs");
     require(left.memoryOffsetDword == right.memoryOffsetDword, prefix + "memory offset differs");
     require(left.shaderDataDwords == right.shaderDataDwords && left.imageMetadataDword == right.imageMetadataDword && left.runtimeImageCount == right.runtimeImageCount && left.runtimeImageResources == right.runtimeImageResources, prefix + "compact data layout differs");
@@ -137,6 +138,7 @@ RecompileResult sampleResult() {
     result.bindings[1].imageShape.reset();
     result.pushConstants = {std::byte{1}, std::byte{0xff}, std::byte{0}, std::byte{0x80}, std::byte{7}};
     result.bdaAbiVersion = 3;
+    result.bdaWrites = true;
     result.memoryOffsetDword = 7;
     result.hostSubgroupSize = 32;
     result.workgroupMemoryDwords = 32769u;

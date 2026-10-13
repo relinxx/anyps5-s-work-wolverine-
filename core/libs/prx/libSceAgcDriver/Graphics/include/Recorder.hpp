@@ -92,6 +92,8 @@ public:
     // neither the mutex nor the recorder nor a particular thread. ~Recorder joins the release
     // thread and waits for every release in progress before the device goes.
     void Keep(std::shared_ptr<void> object, std::size_t bytes = 0);
+    void KeepThroughHold(std::shared_ptr<void> object);
+    void FlushDeferredReleases();
     void KeepTransient(std::shared_ptr<void> object, std::size_t bytes);
     static bool TransientUploadsOverBudget();
     void SettleTransientUploads();
@@ -733,6 +735,7 @@ private:
     void recordBarrier(VkCommandBuffer commands, VkPipelineStageFlags sourceStage, VkPipelineStageFlags destinationStage, VkAccessFlags sourceAccess, VkAccessFlags destinationAccess) const;
     // Opens a batch when none is open, without closing a store run (Commands() does both).
     void ensureOpen();
+    void dropStaleHoldKept();
     // Records the run's pending store (vkCmdUpdateBuffer), if any.
     void flushPendingStore();
     // Records the pending store and the run's trailing barrier; the next store starts a new run.
@@ -800,6 +803,8 @@ private:
     // table is empty (most of the time between label groups).
     std::atomic<std::size_t> recordedLabels{0};
     std::unique_ptr<Batch> open;
+    std::vector<std::shared_ptr<void>> holdKept;
+    std::uint64_t holdKeptSerial = 0;
     std::deque<std::unique_ptr<Batch>> inFlight;
     // Batches popped from inFlight whose completions have not run yet: their writes stay in the
     // snapshot (a rebuild from inside a completion must not drop them) until finish returns.

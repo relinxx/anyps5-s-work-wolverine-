@@ -1,4 +1,5 @@
 #include "prx/libSceAgcDriver/Graphics/include/Resources.hpp"
+#include "prx/libSceAgcDriver/Execution/include/ProcessMemoryPhase.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/BufferPool.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
@@ -341,6 +342,18 @@ std::uint64_t OutOfMemoryFailures() {
 }
 
 VkResult AllocateGpuMemory(const Context& context, const VkMemoryAllocateInfo& allocation, VkDeviceMemory& memory, GpuMemoryKind kind, const char* what, std::uint32_t fallbackTypes) {
+    static const bool traceMemory = std::getenv("APS5_MEMORY_LEDGER") != nullptr;
+    static const bool traceGpu = std::getenv("APS5_TRACE_GPU_MEMORY") != nullptr;
+    const auto heapIndex = context.memory.memoryTypes[allocation.memoryTypeIndex].heapIndex;
+    const auto reportBudget = [&](const char* phase) {
+        if (!traceGpu || context.memoryProperties2 == nullptr || allocation.allocationSize < (64ull << 20u)) return;
+        VkPhysicalDeviceMemoryBudgetPropertiesEXT budget{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT};
+        VkPhysicalDeviceMemoryProperties2 properties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2, &budget};
+        context.memoryProperties2(context.physical, &properties);
+        std::fprintf(stderr, "[gpu-allocation-budget] phase=%s operation=%s bytes=%llu heap=%u used=%llu budget=%llu\n", phase, what, static_cast<unsigned long long>(allocation.allocationSize), heapIndex, static_cast<unsigned long long>(budget.heapUsage[heapIndex]), static_cast<unsigned long long>(budget.heapBudget[heapIndex]));
+    };
+    reportBudget("before");
+    AgcDriver::ProcessMemoryPhase memoryPhase(traceMemory && allocation.allocationSize >= (64ull << 20), what, allocation.allocationSize, context.memory.memoryTypes[allocation.memoryTypeIndex].propertyFlags);
     const auto allocate = context.Function<PFN_vkAllocateMemory>("vkAllocateMemory");
     auto result = allocate(context.device, &allocation, nullptr, &memory);
     VkDeviceSize trimmed = 0;
@@ -366,6 +379,7 @@ VkResult AllocateGpuMemory(const Context& context, const VkMemoryAllocateInfo& a
     }
     if (result == VK_SUCCESS) {
         CountGpuMemory(kind, static_cast<std::int64_t>(allocation.allocationSize));
+        reportBudget("after");
         return result;
     }
     memory = VK_NULL_HANDLE;
@@ -731,7 +745,7 @@ bool CommandBatch::Finished() {
     return true;
 }
 
-void CommandBatch::Wait() {
+void CommandBatch::Wait(bool reap) {
     Require(submitted, "command batch has not been submitted");
     if (!pending) return;
     PerformanceTimer timing("Graphics.Wait");
@@ -740,7 +754,7 @@ void CommandBatch::Wait() {
     if (result == VK_SUCCESS || result == VK_ERROR_DEVICE_LOST) pending = false;
     Check(result, "vkWaitForFences graphics");
     // Recorded batches preceded this one, so their completions (write-backs) can run now.
-    if (auto* recorder = Recorder::Active()) recorder->Reap();
+    if (reap) if (auto* recorder = Recorder::Active()) recorder->Reap();
 }
 
 }

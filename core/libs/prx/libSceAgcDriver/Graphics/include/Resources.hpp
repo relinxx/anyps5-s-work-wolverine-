@@ -14,6 +14,7 @@ std::uint64_t OutOfMemoryFailures();
 
 class Buffer {
 public:
+    std::size_t Size() const { return size; }
     Buffer(const Context& context, std::size_t size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
     ~Buffer();
     Buffer(const Buffer&) = delete;
@@ -108,7 +109,7 @@ public:
     VkCommandBuffer Handle() const;
     void SubmitAndWait();
     void Submit();
-    void Wait();
+    void Wait(bool reap = true);
     bool Finished();
 
 private:

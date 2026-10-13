@@ -6,6 +6,7 @@
 #include "Optimization/ResourceMaterializer.hpp"
 #include "Optimization/ResourceProgram.hpp"
 #include "Recompiler.hpp"
+#include "prx/libSceAgcDriver/Execution/include/InvocationCapture.hpp"
 #include "SceShaders.hpp"
 #include "RdnaDecoder/RdnaInstructionDecoder.hpp"
 
@@ -46,9 +47,11 @@ bool g_spirv = false;
 bool g_graph = false;
 bool g_maintenance8 = false;
 bool g_code = false;
+bool g_invocation = false;
 
 bool Replay(const char* path) {
     auto request = ShaderRecompiler::RequestSerializer{}.Deserialize(ReadText(path));
+    if (g_invocation) AgcDriver::InvocationCapture::RestoreAndVerify(path, request.request);
     std::printf("%s: %zu code words, %zu user data, %zu memory regions, wave%u\n", path, request.request.shader.code.size(), request.request.context.userData.size(), request.request.context.memory.size(), request.request.context.waveSize);
     if (request.request.context.compute.has_value()) {
         const auto& compute = *request.request.context.compute;
@@ -173,6 +176,10 @@ int main(int argc, char** argv) {
     }
     int failures = 0;
     for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) == "--exact-invocation") {
+            g_invocation = true;
+            continue;
+        }
         if (std::string(argv[i]) == "--dis") {
             g_disassemble = true;
             continue;

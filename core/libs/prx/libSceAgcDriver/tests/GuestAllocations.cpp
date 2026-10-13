@@ -20,6 +20,18 @@ namespace {
 
 using AgcDriver::Graphics::Require;
 
+std::atomic<std::uintptr_t> observedRegistrationAddress{0};
+std::atomic<std::size_t> observedRegistrationBytes{0};
+std::atomic<std::uint64_t> observedRegistrationSerial{0};
+std::atomic<unsigned> observedRegistrationCount{0};
+
+void observeRegistration(std::uintptr_t address, std::size_t bytes, std::uint64_t serial) {
+    observedRegistrationAddress.store(address);
+    observedRegistrationBytes.store(bytes);
+    observedRegistrationSerial.store(serial);
+    observedRegistrationCount.fetch_add(1);
+}
+
 template<typename TAction>
 void reject(TAction action) {
     try { action(); }
@@ -73,6 +85,41 @@ void RunGuestLeaseWaitTests() {
 }
 
 void RunGuestAllocationTests() {
+    {
+        std::array<std::byte, 128> memory{};
+        const auto address = reinterpret_cast<std::uintptr_t>(memory.data());
+        GuestAllocations::GuestAllocationsSetRegistrationObserver_nid_postfix(&observeRegistration);
+        observedRegistrationCount.store(0);
+        {
+            GuestAllocations::Mutation mutation;
+            mutation.Add(memory.data(), memory.size(), true, true, true);
+        }
+        const auto serial = observedRegistrationSerial.load();
+        Require(observedRegistrationCount.load() == 1 && observedRegistrationAddress.load() == address &&
+            observedRegistrationBytes.load() == memory.size() && serial != 0,
+            "owner registration observer did not receive the new allocation identity");
+        {
+            GuestAllocations::Mutation mutation;
+            mutation.Protect(memory.data() + 32, 32, true, false, true, [] {});
+        }
+        {
+            const auto lease = GuestAllocations::GuestAllocationsAcquire_nid_postfix();
+            Require(lease.size() == 3 && std::all_of(lease.begin(), lease.end(), [&](const auto& range) { return range->registrationSerial == serial; }),
+                "protection splits did not preserve the owner identity");
+        }
+        {
+            GuestAllocations::Mutation mutation;
+            mutation.Remove(memory.data());
+            mutation.Add(memory.data(), memory.size(), true, true, true);
+        }
+        Require(observedRegistrationCount.load() == 2 && observedRegistrationSerial.load() != serial,
+            "address reuse inherited the prior owner identity");
+        {
+            GuestAllocations::Mutation mutation;
+            mutation.Remove(memory.data());
+        }
+        GuestAllocations::GuestAllocationsSetRegistrationObserver_nid_postfix(nullptr);
+    }
     void* pointer = GuestHeap::GuestHeapAllocate_nid_postfix(32);
     Require(reinterpret_cast<std::uintptr_t>(pointer) % alignof(std::max_align_t) == 0, "guest malloc is not suitably aligned");
     std::memset(pointer, 0x55, 32);

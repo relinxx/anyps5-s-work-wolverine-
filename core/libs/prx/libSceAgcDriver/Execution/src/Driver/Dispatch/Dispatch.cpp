@@ -11,9 +11,12 @@
 #include "prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Texture.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/MemoryLedger.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Capture/PassCapture.hpp"
 #include "Optimization/ResourceProgram.hpp"
 #include "ControlFlow/RequestSerializer.hpp"
+#include "prx/libSceAgcDriver/Execution/include/InvocationCapture.hpp"
+#include "prx/libSceAgcDriver/Execution/include/InvocationDiskCache.hpp"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -271,6 +274,7 @@ void ReportDispatchItems(bool profile) {
 std::vector<std::pair<std::uint64_t, std::uint64_t>> DispatchWriteRanges(const ShaderRecompiler::RecompileResult& compiled, bool& bounded);
 
 void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, const Submission& submission, std::uint64_t indirectArguments) {
+    Graphics::MemoryLedger::Report();
     PerformanceTimer timing("Driver.Dispatch");
     const auto address = (static_cast<std::uint64_t>(readRegister(queue.shader, 0x20c)) << 8u) | (static_cast<std::uint64_t>(readRegister(queue.shader, 0x20d) & 0xffu) << 40u);
     auto it = submission.shaders->upper_bound(address);
@@ -758,7 +762,22 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
 
 
             timing.Mark("capture_resources");
-            compiledResult = invocation.Materialize(*capture);
+            InvocationCapture::Capture(request);
+            std::vector<std::byte> invocationKey;
+            if (InvocationDiskCache::Eligible(request)) {
+                try {
+                invocationKey = InvocationDiskCache::Key(request);
+                compiledResult = InvocationDiskCache::Load(invocationKey);
+                std::fprintf(stderr, "[gpu] exact invocation disk %s 0x%llx\n", compiledResult ? "hit" : "miss", static_cast<unsigned long long>(address));
+                } catch (...) {
+                    invocationKey.clear();
+                    std::fprintf(stderr, "[gpu] exact invocation cache unavailable; using ordinary materialization\n");
+                }
+            }
+            if (!compiledResult) {
+                compiledResult = invocation.Materialize(*capture);
+                if (!invocationKey.empty()) static_cast<void>(InvocationDiskCache::Store(invocationKey, *compiledResult));
+            }
             timing.Mark("materialize");
             if (compiledResult->cacheHit) ++cacheHits;
             const auto elapsed = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();

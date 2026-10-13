@@ -1,0 +1,47 @@
+#version 450
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+
+// Exact per-block comparison of two equally sized device ranges: flags[block] becomes 1 when any
+// 32-bit word of 64 KiB block `block` differs. One workgroup per block (2D grid). Flags are only
+// ever set, never cleared, so the host zeroes them first.
+layout(local_size_x = 256) in;
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer Words { uint value[]; };
+layout(buffer_reference, std430, buffer_reference_align = 4) buffer Flags { uint value[]; };
+layout(push_constant) uniform Parameters {
+    uvec2 reference;
+    uvec2 current;
+    uvec2 flags;
+    uint words;
+    uint groupsX;
+} parameters;
+
+const uint BlockWords = 16384u;
+shared uint differs;
+
+// Byte offsets reach past 4 GiB only through the 64-bit base, never through a 32-bit index.
+uvec2 advance(uvec2 base, uint bytes) {
+    uint carry;
+    uint low = uaddCarry(base.x, bytes, carry);
+    return uvec2(low, base.y + carry);
+}
+
+void main() {
+    uint block = gl_WorkGroupID.y * parameters.groupsX + gl_WorkGroupID.x;
+    uint first = block * BlockWords;
+    // Uniform per workgroup: every invocation of a group takes the same branch.
+    if (first >= parameters.words) return;
+    if (gl_LocalInvocationIndex == 0u) differs = 0u;
+    barrier();
+    uint count = min(BlockWords, parameters.words - first);
+    Words reference = Words(advance(parameters.reference, first * 4u));
+    Words current = Words(advance(parameters.current, first * 4u));
+    for (uint i = gl_LocalInvocationIndex; i < count; i += 256u) {
+        if (reference.value[i] != current.value[i]) {
+            atomicOr(differs, 1u);
+            break;
+        }
+    }
+    barrier();
+    if (gl_LocalInvocationIndex == 0u && differs != 0u) Flags(parameters.flags).value[block] = 1u;
+}

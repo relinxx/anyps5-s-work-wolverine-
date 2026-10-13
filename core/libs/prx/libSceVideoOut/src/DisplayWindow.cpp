@@ -14,6 +14,7 @@
 #include "SDL_syswm.h"
 #include <windows.h>
 #include <commctrl.h>
+#include <psapi.h>
 #endif
 
 namespace {
@@ -122,6 +123,24 @@ void DisplayWindow::UpdateTitle() {
     char text[160];
     std::snprintf(text, sizeof(text), "%s | FPS: %.2f (%llu)", title.value, currentFps, static_cast<unsigned long long>(frameNum));
     SDL_SetWindowTitle(window, text);
+#ifdef _WIN32
+    // Capture process/system memory at startup and around the title/intro-to-loading boundary.
+    // These exact frame markers let the host-side run collector compare working set without
+    // guessing from wall-clock samples when the game advances at single-digit FPS.
+    if (frameNum == 1 || frameNum == 900 || frameNum == 991 || frameNum == 1050 || frameNum == 1051 ||
+        (frameNum >= 1100 && frameNum % 100 == 0)) {
+        MEMORYSTATUSEX memory{sizeof(MEMORYSTATUSEX)};
+        PROCESS_MEMORY_COUNTERS_EX process{};
+        const bool systemKnown = GlobalMemoryStatusEx(&memory) != FALSE;
+        const bool processKnown = K32GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&process), sizeof(process)) != FALSE;
+        std::fprintf(stderr, "[frame-memory] frame=%llu system_known=%u process_known=%u working_set=%llu private_commit=%llu available_phys=%llu system_commit=%llu commit_limit=%llu\n",
+            static_cast<unsigned long long>(frameNum), systemKnown ? 1u : 0u, processKnown ? 1u : 0u,
+            static_cast<unsigned long long>(process.WorkingSetSize), static_cast<unsigned long long>(process.PrivateUsage),
+            static_cast<unsigned long long>(memory.ullAvailPhys), static_cast<unsigned long long>(memory.ullTotalPageFile - memory.ullAvailPageFile),
+            static_cast<unsigned long long>(memory.ullTotalPageFile));
+        std::fflush(stderr);
+    }
+#endif
 }
 
 void DisplayWindow::installSubclass() {

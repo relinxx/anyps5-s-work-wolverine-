@@ -726,6 +726,11 @@ if(BUILD_TESTING)
         target_compile_definitions(guest_memory_tests PRIVATE GUEST_MEMORY_MODULE="$<TARGET_FILE:guest_memory_module>")
         set_tests_properties(guest_memory PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+        add_test(NAME guest_memory_file_backed COMMAND guest_memory_tests)
+        set_tests_properties(guest_memory_file_backed PROPERTIES
+            ENVIRONMENT "APS5_FILE_BACKED_DIRECT_MEMORY=1"
+            ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>"
+            TIMEOUT 45)
     endif()
     add_test_executable(guest_mlock_tests ${LIBS_INCLUDE_DIR}/tests/GuestMlock.cpp)
     target_include_directories(guest_mlock_tests PRIVATE ${LIBS_INCLUDE_DIR})

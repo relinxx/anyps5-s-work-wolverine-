@@ -1121,6 +1121,7 @@ Recorder::~Recorder() {
     } catch (const std::exception& error) {
         std::fprintf(stderr, "[gpu] recorder teardown: %s\n", error.what());
     }
+    holdKept.clear();
     if (activeRecorder == this) {
         activeRecorder = nullptr;
         pendingWrites.store(nullptr, std::memory_order_release);
@@ -1533,6 +1534,8 @@ void Recorder::ensureOpen() {
         }
         batch->queue = GuestMemory::GpuLockThreadTag();
         if (countingSamples && !segmentMode()) beginSamples(*batch);
+        dropStaleHoldKept();
+        batch->kept.insert(batch->kept.end(), holdKept.begin(), holdKept.end());
         open = std::move(batch);
         // The whole-batch range: its start stamp waits for the previous batches like any
         // bottom-of-pipe stamp, so it marks when this batch's execution began.
@@ -2469,15 +2472,42 @@ void Recorder::Keep(std::shared_ptr<void> object, std::size_t bytes) {
     open->keptBytes += bytes;
 }
 
+void Recorder::KeepThroughHold(std::shared_ptr<void> object) {
+    GuestMemory::AssertGpuLockHeld("Recorder::KeepThroughHold");
+    if (const auto hold = GuestMemory::GpuHoldSerial(); hold != holdKeptSerial) {
+        holdKept.clear();
+        holdKeptSerial = hold;
+    }
+    Keep(object);
+    holdKept.push_back(std::move(object));
+}
+
+void Recorder::dropStaleHoldKept() {
+    if (!holdKept.empty() && holdKeptSerial != GuestMemory::GpuHoldSerial() && GuestMemory::GpuMutex().HeldByThisThread()) holdKept.clear();
+}
+
+void Recorder::FlushDeferredReleases() {
+    holdKept.clear();
+    ReleaseDeferredKeeps();
+}
+
 void Recorder::BoundKeptBytes() {
     if (!GuestMemory::GpuMutex().HeldByThisThread()) return;
-    if (open != nullptr && open->keptBytes >= KeptBytesBudget) Submit();
-    if (DeferredBytes() != 0 && inFlightKeptBytes + DeferredBytes() > 2 * KeptBytesBudget) DestroyDeferred(TakeDeferred(), false);
-    while (!inFlight.empty() && inFlightKeptBytes > 2 * KeptBytesBudget) {
+    static const std::size_t budget = [] {
+        const auto* value = std::getenv("APS5_RECORDER_KEPT_MIB");
+        return value != nullptr ? (std::clamp<std::size_t>(std::strtoull(value, nullptr, 10), 1, 4096) << 20u) : KeptBytesBudget;
+    }();
+    if (open != nullptr && open->keptBytes >= budget) Submit();
+    if (DeferredBytes() != 0 && inFlightKeptBytes + DeferredBytes() > 2 * budget) DestroyDeferred(TakeDeferred(), false);
+    const auto before = inFlightKeptBytes;
+    unsigned finished = 0;
+    while (!inFlight.empty() && inFlightKeptBytes > 2 * budget) {
         auto batch = std::move(inFlight.front());
         inFlight.pop_front();
         finish(std::move(batch), true, 4, true);
+        ++finished;
     }
+    if (finished != 0 && std::getenv("APS5_MEMORY_LEDGER") != nullptr) std::fprintf(stderr, "[gpu-transient-bound] owned_before=%zu owned_after=%zu budget=%zu batches_finished=%u\n", before, inFlightKeptBytes, budget, finished);
 }
 
 namespace {
@@ -3261,6 +3291,7 @@ struct SubmitSiteStats {
 }
 
 void Recorder::Submit() {
+    dropStaleHoldKept();
     const std::uint64_t work = SubmitsTraced() && open != nullptr && activeRecorder == this ? workSinceSubmit.load(std::memory_order_relaxed) : 0;
     PerformanceTimer frameTiming("Recorder.Submit");
     // The work count is cleared even when nothing is open: the driver counts a dispatch after its
@@ -3683,6 +3714,7 @@ bool Recorder::syncThroughUnlocked(std::uint64_t address, std::uint64_t end, int
 
 bool Recorder::Reap() {
     PerformanceTimer frameTiming("Recorder.Reap");
+    dropStaleHoldKept();
     const bool profile = DrawProfiled();
     const auto start = profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     std::uint64_t retired = 0;

@@ -1652,7 +1652,7 @@ void keepRecordedDraw(Recorder& recorder, const std::shared_ptr<ShaderResources>
     kept->scratch = std::move(scratch);
     kept->targets = std::move(targets);
     const auto& residents = kept->targets;
-    recorder.Keep(kept);
+    recorder.Keep(kept, resources->OwnedBufferBytes());
     if (checkRecords) recorder.OnComplete(std::move(checkRecords));
     // Counted for the [address-sync] line: a lease released by the completion (the pin waiter
     // finishes the recorder up to the open batch, which holds the kept resources and gets the
@@ -1678,6 +1678,8 @@ void keepRecordedDraw(Recorder& recorder, const std::shared_ptr<ShaderResources>
     for (const auto& resident : residents) {
         if (resident != nullptr) resident->MarkDirty();
     }
+    recorder.BoundKeptBytes();
+    resources->FinishBoundedHeapWriteBack(recorder);
 }
 
 // What recordDraw records from: the recorder, the resources, the pipeline and framebuffer, the
@@ -2641,7 +2643,7 @@ DrawRecipeOutcome DrawWithRecipe(const Context& context, const State& state, con
     if (!proved) {
         SharedResourceCache().Remove(recipe.key, resources.get());
         countCache(&DrawProfile::cacheInvalidated);
-        recorder->Keep(std::move(resources));
+        recorder->Keep(resources, resources->OwnedBufferBytes());
         timer.phase(PhaseLookup);
         return miss(DrawRecipeMiss::Proof);
     }

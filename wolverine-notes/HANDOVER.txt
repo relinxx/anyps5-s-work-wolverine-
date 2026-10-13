@@ -1,0 +1,838 @@
+WOLVERINE / ANYPS5 DEBUGGING HANDOVER
+Prepared 2026-10-13. Read this before changing the code or launching another run.
+
+OUTCOME: NOT PLAYABLE. No verified gameplay, sustained playable frame rate, or
+successful completion of the post-intro transition. The latest changes passed
+focused tests but did not deliver the user's requested result. Do not describe
+this project as fixed or optimized successfully on the strength of those tests.
+
+The user has requested a handover and a researched replacement agent/tool
+recommendation. Patching and game launches are paused for this handover.
+No new game run, build, installation, or runtime staging was performed to create it.
+
+1. RECOMMENDATION AND LIMITS
+
+My capability-first choice for the next investigation is Claude Code CLI with
+Claude Fable 5.1, initially at its high effort default, working locally on this
+Windows machine. Anthropic identifies it as its most capable generally available
+model and specifically positions it for long investigations. This is a reasoned
+task-fit choice, NOT an independently established ranking for Vulkan emulation,
+and NOT a guarantee that the game can be made playable on this hardware.
+
+Choose the explicit model claude-fable-5-1, verify the model displayed by Claude
+Code, and check account access before paying. Current official documentation says
+Fable 5.1 requires Claude Code v2.1.257 or later. Some plans require usage credits;
+the model picker indicates this. An alias can resolve differently through a
+gateway. No account access or installed version was verified during this handover.
+Do not enable unattended paid use without the user's own budget decision.
+
+Lower-cost alternative: Claude Code with Opus 5.5. Anthropic describes Opus 5.5
+as close to Fable 5.1 on most work, with lower token prices. This investigation
+has no measured evidence that paying for Fable instead will solve this bug.
+The user already used Claude Code; merely switching the name of the assistant
+without changing the evidence-gathering method is unlikely to be sufficient.
+
+Other tools reviewed:
+- Cursor Debug mode can formulate hypotheses, add instrumentation and use runtime
+  evidence. It is a reasonable editor workflow, but its documentation does not
+  establish special ability to diagnose this Vulkan/Windows residency problem.
+- Gemini CLI has shell execution and project checkpointing. It could inspect
+  the same evidence, but I found no task-specific basis to prefer it here.
+- A Vulkan/emulator developer with these profiling tools is my strongest overall
+  recommendation if available. Domain knowledge of memory coherence and guest
+  command semantics is more valuable here than repeated speculative settings.
+
+Use the AI with this tool stack:
+A. NVIDIA Nsight Systems FIRST: correlate CPU threads, Vulkan calls, GPU queues,
+   copies, waits and long gaps around the post-intro transition. Windows Vulkan
+   profiling is supported. Capture a short relevant interval, not the whole boot.
+B. Windows Performance Recorder/Analyzer: correlate disk/file I/O, hard faults,
+   CPU execution and allocation pressure with that same interval. This separates
+   file-backed guest-memory activity from snapshot spooling and pagefile traffic.
+C. WinDbg or a compatible native debugger: inspect a live hang's thread stacks,
+   waits and any actual exception. The project uses MinGW: verify symbol support.
+   Do not assume WinDbg will resolve every DWARF C++ symbol. GDB/LLDB or offline
+   address-to-source tools may be necessary with these artifacts.
+D. NVIDIA Nsight Graphics: investigate a specific problematic dispatch/frame
+   after the system timeline identifies it. Check RTX 5070/driver/tool support
+   and capture overhead. Live shader debugging can have extra hardware/setup
+   requirements; it is not assumed to work on this single-GPU machine unchanged.
+E. Nsight Aftermath is conditional: use if there is evidence of a GPU exception,
+   device loss or TDR. A collector RAM stop is not a GPU crash.
+
+Do not use Nsight Compute as the primary profiler for this Vulkan workload; its
+focus is CUDA. Do not launch multiple profilers or build jobs together on 16 GB.
+Nsight Systems CLI can terminate its launched process when a timed collection
+ends by default. Check installed-version behavior and use the supported no-kill
+option (currently --kill none) when the intent is to leave the game running.
+
+Official sources checked on 2026-10-13:
+https://www.anthropic.com/claude/fable
+https://www.anthropic.com/claude-fable-and-mythos-5-1
+https://www.anthropic.com/claude-opus-5-5
+https://code.claude.com/docs/en/model-config
+https://prod.cursor.com/help/ai-features/debug-mode
+https://geminicli.com/docs/tools/shell/
+https://geminicli.com/docs/cli/checkpointing/
+https://docs.nvidia.com/nsight-systems/UserGuide/index.html
+https://developer.nvidia.com/nsight-graphics
+https://learn.microsoft.com/en-us/windows-hardware/test/wpt/
+https://learn.microsoft.com/en-us/windows-hardware/drivers/debugger/user-mode-dump-files
+These document capabilities, not a success probability for this game.
+
+2. USER GOAL AND OBSERVED FAILURE
+
+Make Marvel's Wolverine progress into controllable gameplay, with substantially
+lower RAM/VRAM pressure, reasonable loading time and sustained usable performance.
+The user repeatedly saw roughly 7-14 FPS in intros followed by a black transition
+around the displayed 928-991 frame region. Some other attempts were 1-3 FPS.
+They were dissatisfied with repeated tests, promises and fixes that did not
+advance beyond the same point. Screenshots alone do not establish deadlock,
+out-of-memory, GPU failure or a precise final frame count.
+
+Do not report success because a title says 12 FPS on a frozen frame. Presentation
+counts, internal guest frame indices and periodic log counters differ. Timestamp
+the last actual present and subsequent CPU/GPU progress separately.
+
+The user's report of steady 13.1-13.3 GB RAM during much of an earlier run was
+valid. The removed giant snapshot allocations did not have to reappear for the
+run to fail. That run's measured available RAM dropped near its end, AFTER the
+black-screen slowdown had already begun. RAM guard termination explains the
+process exit; it does not by itself explain the earlier stalled transition.
+
+3. MACHINE, REPOSITORY AND IMPORTANT PATHS
+
+Workspace ROOT:
+C:\Users\pc\Documents\Codex\2026-10-10\github-plugin-github-openai-curated-remote
+Unless explicitly absolute, paths in this document are relative to ROOT.
+Each path family is rooted here; do not assume the repository is the workspace.
+
+Hardware recorded in this investigation: Ryzen 5 7500F; RTX 5070 12 GB; 16 GB RAM
+(approximately 15.6 GB usable); Windows; C: NVMe SSD. Reconfirm current NVIDIA
+driver, Windows build and RAM availability before a new profiling experiment.
+
+Source repo: work/AnyPS5-michon
+Build: work/michon-build
+Runtime: work/wolverine-michon-runtime
+Run records: work/wolverine-michon-runs
+Notes/helpers: work/research
+Origin: https://github.com/MichonGoddijn231849/AnyPS5-fork.git
+Branch: wolverine/testing
+HEAD: 913a29b20d4c21bfe080819bedfa1106cf313394
+Local edits extend this HEAD substantially. HEAD alone does NOT reproduce it.
+Runtime app0 is a junction to game data: do not traverse it for cleanup or bundle
+the game. No game binaries/assets are included in this handover package.
+
+Bundled Python:
+C:/Users/pc/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/python.exe
+MinGW CMake, Ninja, compiler and CTest: work/toolchain/mingw64/bin
+
+4. FROZEN STATE AND RECOVERY MATERIAL
+
+Current runtime and built libSceAgcDriver.prx SHA256 (both independently checked):
+4532f7204ccf06b82cd4e5651dee87b6d03c8b9c94c29193dbd797f6e5b7207b
+Runtime file: work/wolverine-michon-runtime/libs/libSceAgcDriver.prx
+Built file: work/michon-build/core/libs/libs/libSceAgcDriver.prx
+Previous driver backup: work/research/michon-driver-backup-20261013T002843Z
+Compiler SourceVersion: 0xb112501c745fb4ac (unchanged in Round 7).
+Runtime inventory: work/research/michon-staged-runtime.json
+
+This handover directory contains:
+- HANDOVER.txt: this document.
+- state.json: current Git state, changed-source hashes, complete latest run.json
+  and runtime manifest. It includes exact effective environment and test guards.
+- source-changes.patch: tracked changes against HEAD, including binary diffs.
+- changed-source-and-helpers.zip: exact current modified/untracked source files,
+  selected launch helpers, settings and previous Claude/Codex text reports.
+  This is a source rescue package, not a standalone build or full repo clone.
+- run-summary.json: selected runs and latest snapshot/sample measurements.
+
+Untracked source headers and tests are essential. A Git patch alone misses them.
+Do not git reset/clean/stash-away this tree as a first step. Preserve other
+contributors' edits. Restoring in a new checkout requires matching HEAD,
+submodules/dependencies, the tracked patch and untracked files. Never apply this
+patch twice to the current already-modified checkout.
+
+In older notes, 'staged driver' means copied into the runtime; it does not imply
+Git staging or a published commit. Historical backup hashes are not the current
+build. Old handoff notes are evidence of history, not authoritative current state.
+The old WOLVERINE_LAST_RUN.txt/desktop instructions can lag diagnostic runs.
+The latest authoritative run for this handover is named explicitly below.
+
+5. LATEST RESULT: STILL FAILED
+
+work/wolverine-michon-runs/20261013T002845Z-3b4b885f
+Started 2026-10-13 00:28:45 UTC (05:28:45 Pakistan).
+Collector requested stop at 285.516 seconds; collection finished at 288.750s.
+Reason: physical memory reserve reached. natural_exit=false, exit_code=1.
+Available physical RAM at guard: 528,384,000 bytes (503.9 MiB).
+Available commit at guard: 527,826,944 bytes (503.4 MiB).
+Free disk at guard: 14,696,214,528 bytes (~13.69 GiB).
+Limits for this DIAGNOSTIC run: 512 MiB RAM, 256 MiB commit, 8 GiB free disk,
+900 seconds. Standalone default RAM reserve remains 1 GiB.
+
+The collector explicitly terminated this selected game process. This particular
+exit is NOT evidence of a natural game crash. It remained unsuccessful and the
+earlier black transition still needs a causal diagnosis.
+
+Large snapshot example: 2,868,903,936 logical bytes; 462,094,336 mixed bytes
+spooled; 2,406,809,600 uniform bytes encoded compactly; 700,480 metadata bytes;
+32 MiB declared scratch bound; 32 physical write calls. Latest capture durations
+varied substantially (approximately 0.8-7.8 seconds). Exact extracted figures
+are in run-summary.json. A longer run duration is not proof of better FPS.
+
+Every run directory has run.json, stdout.log, stderr.log and resource samples;
+some have additional event JSONL files. Read run.json first to classify the exit.
+The latest stderr is about 19.6 MB: filter it instead of injecting it all into
+an AI context. Receipt timestamps are not producer timestamps and do not prove
+causal ordering between stdout/stderr streams.
+
+6. SELECTED RUN HISTORY — AVOID REPEATING THESE BLINDLY
+
+20261012T215812Z-9e29a705: import retirement at 4096 MiB free target; 39 passes,
+  1689 MiB cumulative retired, 94,530 allocs/82,972 frees; imports returned to
+  ~6020 MiB/11,239 handles. RAM guard at 264.469s. Churn, not solved residency.
+20261012T231203Z-2b62d069: bounded snapshots active, 3.1-4.7s captures;
+  RAM guard near 227s, ~757 MiB available. Not natural crash.
+20261012T235509Z-5a218649: deliberate invocation-capture marker stop at182.688s.
+20261013T000512Z-f763b386: GPU shader cache warmed offline; RAM guard181.719s,
+  before target NVIDIA pipeline creation. GPU prewarming alone insufficient.
+20261013T001506Z-8ccaa42a: full invocation cache enabled; RAM guard168.484s
+  while imports were still being built. No verified cache/FPS benefit.
+20261013T002016Z-84df2568: diagnostic512 MiB RAM reserve; shader materialization
+  19.373s; GPU pipeline input matched prewarmed input, pipeline ready<1s;
+  repeated large snapshots4.9-6.2s; guard239.657s. Still not playable.
+20261013T002845Z-3b4b885f: unbuffered snapshot spool; guard285.516s; still failed.
+
+These runs differ in configuration, cache contents and resource conditions.
+Do not derive an A/B FPS improvement from their durations or screenshot counters.
+
+7. WHAT WAS ACTUALLY FIXED AND TESTED
+
+A. Required compute work was silently skipped during background compilation.
+File: core/libs/prx/libSceAgcDriver/Execution/src/VulkanDevice.cpp
+Prior path could omit a dispatch while its background pipeline was unfinished.
+The new path keeps a shared future, waits for required work and propagates
+compilation failure. A forced-background real-GPU test reproduced wrong
+0xcdcdcdcd output before the change and passed afterward.
+Test: agc_background_pipeline_required_dispatch.
+Logs: round7-background-before.log; round7-required-dispatch-tests.log.
+This is a correctness fix, not permission to skip necessary work to inflate FPS.
+
+B. A very expensive actual NVIDIA pipeline was precompiled outside the game.
+Guest shader0x11d0376e00:30120 raw words; materialized SPIR-V1,875,662 words,
+~56,509 blocks,5 functions. See round7-pipeline-shape.json.
+Offline cold driver compile172.4s, peak private6.844GiB/resident6.393GiB.
+Warm repeat logged0.0s, meaning below displayed precision, not zero work.
+Records: round7-offline-runs/20261013T000009Z-675d53b5 and
+round7-offline-runs/20261013T000354Z-6cd641ba (under work/research).
+Pipeline input bytes later matched live output exactly. This verifies warming
+that pipeline; it does not verify gameplay or eliminate CPU specialization.
+Cache installation evidence: round7-pipeline-cache/installation.json.
+Original cache backup: round7-pipeline-cache/runtime-cache-before-install.bin.
+
+C. Exact invocation capture/replay infrastructure added.
+Driver header Execution/include/InvocationCapture.hpp; tools/DispatchRun.cpp
+supports --prepare-exact; tools/ShaderReplay.cpp has --exact-invocation support.
+Capture folder: work/research/invocation-inputs-20261012T235509042535Z.
+It contains invocation.req, .target, .key and pipeline_11d0376e00.bin.
+Sidecar restores four target-extension fields; audit found fixedPushSlots was
+the omitted serializer field, while the other three were already serialized.
+Older notes saying all four were missing overstate that omission.
+
+D. Full invocation result disk cache added, but not successful across live runs.
+Header Execution/include/InvocationDiskCache.hpp; test tests/InvocationDiskCache.cpp.
+Opt-in APS5_DISK_INVOCATION_MIN_CODE_WORDS=20000; standalone default leaves it off.
+Key includes source/compiler identity, serialized live inputs and target fields.
+Bound64MiB/entry,256MiB directory,32 entries. Excludes unsupported image/sampler/
+feedback bindings and poisoned captures. Resets process-local pipeline IDs.
+Offline result encode/decode was byte-identical and corruption tests passed.
+Live requests differed in11 bytes AND output binding addresses. Identical
+pipeline SPIR-V does not make complete cached resource bindings reusable.
+DO NOT mask those key bytes or reuse old guest addresses to force a hit.
+The cache has not established the desired live materialization reduction.
+
+E. Bounded snapshot representation replaced giant snapshot allocations.
+Files Graphics/include/HeapWritebackSnapshot.hpp; Graphics/src/GuestBufferMemory.cpp.
+64KiB uniform-byte blocks are represented compactly; mixed bytes are spooled.
+Transfers are bounded16MiB chunks; original GPU bytes remain exact. Packing
+mixed blocks reduced many small operations into one write/read per chunk.
+Latest change uses FILE_FLAG_NO_BUFFERING plus DELETE_ON_CLOSE, aligned
+VirtualAlloc scratch and sector checks. Final physical writes can be padded;
+logical bytes/tails remain exact. WRITE_THROUGH alone had still used file cache.
+This avoids an additional buffered-file-cache cost; it does not eliminate full
+multi-GiB GPU readback, scanning or writeback work. Live captures remain slow.
+Microsoft references:
+https://learn.microsoft.com/en-us/windows/win32/fileio/file-caching
+https://learn.microsoft.com/en-us/windows/win32/fileio/file-buffering
+
+F. Earlier changes retained (not all authored in Round7).
+IR reclamation, preparation queue bounds, resource/texture/host-buffer budgets,
+import-first paths, source-range trimming, memory accounting and ledger changes.
+Claude's P1 patch was measurement-only, NOT a memory reduction in itself.
+Per-allocation classes use device+handle identity, avoid overlapping categories,
+and report accounting errors. Heap accounting is Windows heaps, not complete
+physical residency. Pressure ledger runs on application paths; overhead matters.
+Consult preserved Claude/Codex notes and exact diffs rather than attributing every
+local modification to one agent or one round.
+
+8. CORRECTNESS CONSTRAINTS THAT MUST SURVIVE OPTIMIZATION
+
+- Critical GPU-writable host import:0x1120000000+0xac600000 (~2758MiB).
+  It must remain coherent. Blindly unpinning it, substituting a stale CPU copy
+  or making it read-only can corrupt dynamic GPU writes.
+- Before/after writeback snapshots preserve the pre-work GPU baseline while
+  respecting concurrent CPU updates. Reading guest RAM as the original baseline
+  is not equivalent. GPU ordering and lifetime fences must remain correct.
+- A hash is not an exact dirty-byte proof. If using block fingerprints, collisions
+  must not silently lose writes; exact comparison or equivalent proof is needed.
+- Imports can outlive cache removal because pending GPU work holds references.
+  Retirement must defer destruction until completion. Removing a map entry is
+  not evidence that physical pages have immediately become unpinned.
+- SourceVersion/cache identity must reflect compiler changes. Do not forge the
+  old key or use stale generated shaders merely to keep the cache warm.
+- GPU pipeline cache bytes are device/driver specific. Preserve metadata and
+  back up before replacement. Do not overwrite a live process's cache.
+- APS5_DUMP_PIPELINE_DIR is a diagnostic skip/stop route, not a benchmark route.
+  APS5_TRACE_PIPELINE_DIR captures inputs while continuing required work.
+- Do not remove RAM/commit/disk guards to conceal an unresolved memory problem.
+- Do not disable protection, pagefile, fan control or unrelated Windows services
+  as a substitute for fixing emulator behavior. No further debloating is part of
+  this handover. Avoid killing unknown Codex/Claude/helper processes by name.
+
+9. CURRENT BLOCKERS, WITH CONFIDENCE LABELS
+
+CONFIRMED: repeated broad heap snapshot/readback work takes seconds and can
+hold up rendering/resource handling. Bounded allocation fixed one cost, not the
+amount of memory examined. Full-heap work occurs despite mostly uniform data.
+
+CONFIRMED: CPU shader materialization/specialization remains around15-20s for
+the large target. GPU cache warming only removed a separate driver compilation.
+Full invocation caching currently misses legitimately on changing bindings.
+
+CONFIRMED: host imports occupy roughly6GiB across many thousands of allocations;
+small-window eviction already caused re-import churn. AcquireRegistered/address
+space construction makes broadly registered memory accessible; cache reuse can
+mark many imports recently used. Admission alone is not useful residency control.
+
+CONFIRMED: actual latest process exit was the RAM guard, with little commit
+headroom remaining. Process private commit and resident working set measure
+different things. Device-local Vulkan allocations have contributed private
+commit on this driver; imported pages pin existing memory. Shared GPU memory
+overlaps system RAM. Never add Task Manager shared GPU memory to used RAM.
+
+UNRESOLVED: exact causal chain stopping the guest's post-intro progress. A
+specific guest wait, unsupported command/resource behavior, or synchronization
+problem may remain even after memory pressure is reduced. This needs live
+CPU/GPU progress evidence and a focused repro, not another screenshot diagnosis.
+
+UNRESOLVED: how much stalling is snapshot I/O versus mapped backing faults,
+memory trimming/refaults, resource-lock ownership, CPU translation or GPU waits.
+100% disk active time with low throughput is not proof of pagefile thrashing.
+Low GPU utilization is consistent with upstream stalls but doesn't identify one.
+
+UNRESOLVED: sustained gameplay compatibility/performance on this16GiB host.
+A larger-memory machine could be a useful controlled diagnostic, but is not
+proof that a hardware purchase would solve the emulator's correctness problems.
+
+10. NEXT INVESTIGATION — SPECIFIC DECISION POINTS
+
+Priority1: classify the transition BEFORE changing memory policy again.
+Preserve this tree/build/settings. Inspect latest dispatch phase timings and
+snapshot records, then design one focused capture around the failing transition.
+Collect two or three live thread-stack samples separated in time; correlate with
+Vulkan submission/completion, fence/timeline values, last present, guest queue
+progress and I/O. Distinguish active repeated work, a CPU wait cycle, GPU wait,
+shader compilation, or resource exhaustion. If the process faults naturally,
+capture the exception and stack before describing it as a crash.
+
+Priority2: reproduce the dominant expensive operation outside the whole game.
+The captured invocation and full-heap fixtures already exist. Extend the smallest
+repro that preserves actual bytes/order/lifetimes. This is faster and less memory
+intensive than replaying minutes of intros after every edit.
+
+Candidate changes, contingent on evidence:
+A. GPU-side exact uniform-block detection/compaction or exact changed-block
+   detection could reduce PCIe readback from2.7GiB to the real data subset.
+   This is NOT implemented. Account for baseline storage, GPU scratch budget,
+   exact comparison, synchronization, overlapping GPU/CPU writes and barriers.
+   Do not merely move the same giant duplicate allocation to another pool.
+B. Reduce broad snapshot scope only after proving which guest-address ranges
+   may be written, including bindless/BDA/indirect accesses and aliasing. Static
+   descriptor ranges alone might miss writes. Never assume unwritten uniform
+   blocks stay uniform across a dispatch.
+C. Split invariant compiled SPIR-V from fresh dynamic resource bindings, with
+   proper compiler identity and reconstruction tests. Do not relax the current
+   full-result cache key to obtain a misleading hit.
+D. Selective import residency needs accurate use/lifetime evidence and an
+   address-space rebuild policy that does not immediately re-import everything.
+   The current pressure eviction experiment is OFF for a reason.
+E. Sparse backing for the2.7GiB fallback mirror is a design candidate only.
+   Validate Vulkan sparse feature support, binding granularity, guest BDA access,
+   holes, residency/fence ordering and GPU writes. No implementation or proof exists.
+F. If CPU stacks show cache census/diagnostics/trim overhead dominating, reduce
+   the verified expensive instrumentation or repeated refaults and compare at
+   equal scene/progress. Do not guess by dropping all diagnostics simultaneously.
+
+Choose ONE evidenced bottleneck and one reversible patch. Validate exact output
+and lifetime behavior, then compare the same scene with the same shader-cache
+state and guard limits. If it does not help, record why and revert that isolated
+experiment, not the whole tree. Stop counting more intro frames as completion.
+
+11. VALIDATION CONTRACT
+
+MilestoneA: reach and render beyond the current post-intro black transition,
+with continuous guest progress and no skipped required GPU commands.
+MilestoneB: enter controllable gameplay and demonstrate input response/rendering
+for a defined interval (suggested10minutes if resources allow).
+MilestoneC: report loading duration, median/95th/99th frame time, long-stall count,
+peak process/private/system commit, availableRAM, dedicated/sharedGPU usage,
+hardfaults and I/O at comparable scene points. Define a desired FPS target with
+the user; do not silently invent30/60FPS as an achieved result.
+Screenshots and unit tests are supporting evidence, not proof of these milestones.
+
+12. TESTS THAT HAVE PASSED — AND THEIR LIMITS
+
+round7-result-cache-tests.log:5/5,21.28s: host-import retirement, stream writeback,
+import-first heap, required background dispatch, invocation disk-cache identity.
+round7-unbuffered-tests.log:3/3,10.63s: device heap mirrors, stream writeback,
+import-first heap. These include realRTX5070 execution for the relevant fixtures.
+Newest snapshot fixtures cover mixed/uniform blocks, partial tails, aligned
+padding, CPU updates, GPU ordering and temporary-file cleanup.
+Microbenchmark capture speedup is not a game FPS speedup.
+
+Earlier Claude P1 reports15/15 default tests and5/5 forced-trim/ledger tests.
+Memory-accounting test uses fake Vulkan calls and says so; real import tests
+also exercised the actual GPU. Those earlier suites were not rerun for handover.
+No full-project test suite or full game correctness proof is claimed here.
+
+13. BUILD / RUN REPRODUCTION
+
+Run from ROOT in PowerShell, with no game active and sufficient memory.
+These are instructions for the successor; none are being run by this handover.
+
+$env:PATH = "$PWD/work/toolchain/mingw64/bin;$env:PATH"
+& ./work/toolchain/mingw64/bin/cmake.exe --build ./work/michon-build --target libs agc_driver_device_heap_mirrors_tests agc_import_first_heap_tests agc_invocation_disk_cache_tests -j2
+
+Focused tests (check names against this build):
+& ./work/toolchain/mingw64/bin/ctest.exe --test-dir ./work/michon-build --output-on-failure -R '^(agc_driver_device_heap_mirrors|agc_driver_device_heap_stream_writeback|agc_import_first_heap|agc_background_pipeline_required_dispatch|agc_invocation_disk_cache)$'
+
+Driver copy/staging helper, only after review/tests and no game process:
+& 'C:/Users/pc/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/python.exe' ./work/research/stage_michon_driver.py --library libSceAgcDriver.prx
+Check helper help and manifest before staging a successor build.
+
+Normal standalone launcher:
+& 'C:/Users/pc/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/python.exe' ./work/research/run_wolverine_standalone.py
+Use --check-only for preflight without launching.
+Desktop shortcut: C:/Users/pc/Desktop/Wolverine - Local Test.cmd
+It runs without Codex open. It currently launches the unsuccessful build described
+here; this is a reproduction route, not a recommendation to repeat the same test.
+
+The latest DIAGNOSTIC configuration is instead:
+& 'C:/Users/pc/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/python.exe' ./work/research/round7_test_warm_game.py
+It adds pipeline tracing, invocation caching and a512MiB RAM reserve. Normal
+launcher remains1GiB. Do not confuse results between these two launchers.
+
+Launcher clears inherited APS5/ANYPS5/VK diagnostic variables and sets a controlled
+environment. Use the effective environment in run.json, not your shell assumptions.
+Preflight verifies runtime hashes/no existing game and requires4GiB availableRAM,
+4GiB commit headroom,12GiB disk. It does not promise those resources suffice.
+The current frame capture is every16 frames, up to128, downscale4. Capture can
+add overhead (full source GPU readback before downscale). A profiling control
+should measure this, not claim it is the primary cause without evidence.
+
+14. PRIMARY CODE MAP (paths relative to work/AnyPS5-michon)
+
+core/libs/prx/libSceAgcDriver/Execution/src/Driver/Dispatch/Dispatch.cpp
+  Dispatch preparation/materialization, invocation-cache integration, phase logs.
+core/libs/prx/libSceAgcDriver/Execution/src/VulkanDevice.cpp
+  Compute pipeline lifetime, required background dispatch, pipeline input dumps.
+core/libs/prx/libSceAgcDriver/Execution/src/GuestMemory.cpp
+  Guest registrations, import acquisition/retirement/address-space behavior.
+core/libs/prx/libSceAgcDriver/Graphics/src/GuestBufferMemory.cpp
+  Heap mirror references and writeback. Follow callers/lock ownership.
+core/libs/prx/libSceAgcDriver/Graphics/include/HeapWritebackSnapshot.hpp
+  Exact bounded snapshot representation, packing, unbuffered temporary spool.
+core/libs/prx/libSceAgcDriver/Graphics/src/Recorder.cpp
+  Completion/fence/lifetime/synchronization and deferred-release machinery.
+core/libs/prx/libSceAgcDriver/Graphics/src/MemoryAccounting.cpp
+core/libs/prx/libSceAgcDriver/Graphics/src/MemoryLedger.cpp
+core/libs/prx/libSceAgcDriver/Graphics/src/VramBudget.cpp
+  Allocation accounting and pressure/budget diagnostics.
+core/libs/prx/libSceAgcDriver/Execution/include/InvocationDiskCache.hpp
+core/libs/prx/libSceAgcDriver/Execution/include/InvocationCapture.hpp
+core/libs/prx/libSceAgcDriver/tools/DispatchRun.cpp
+core/libs/prx/libSceAgcDriver/tools/ShaderReplay.cpp
+  Exact capture/replay/prototype cache. Inspect binding ownership closely.
+core/shader/recompiler/Recompiler.cpp
+core/shader/recompiler/IntermediateRepresentation/src/IrProgram.cpp
+  Source IR reclamation and specialization ownership/caches.
+core/libs/prx/libc/src/GuestArena.cpp
+core/libs/prx/libkernel/DirectMemory/DirectMemory.cpp
+  Guest memory backing, mappings and trimming. Host/guest semantics matter.
+
+15. READING ORDER / PREVIOUS HANDOFFS
+
+Read current run.json and this handover first. Then, under work/research:
+CODEX_ROUND7_INVESTIGATION.txt (chronological; later entries supersede earlier)
+CODEX_IMPORT_PRESSURE_REVIEW.txt (failed eviction/churn experiment)
+CODEX_HEAP_RECLAIM_REVIEW.txt
+CLAUDE_ROUND5_ANALYSIS.txt (memory attribution hypotheses and facts)
+CLAUDE_ROUND5_P1_DONE.txt (measurement-only patch and review/test claims)
+CLAUDE_ROUND6_BRIEF.txt
+CLAUDE_HANDOFF_CURRENT.txt
+CLAUDE_HANDOFF_MICHON_20261013.txt
+CODEX_REVIEW_CLAUDE_20261013.txt
+Some older notes contain stale driver hashes or pending outcomes. Use the dated
+run records and handover hashes to resolve conflicts. Do not reassert their
+hypotheses as proven explanations of the present failure.
+
+Reviewed upstream PR identities and integration notes are retained in state.json
+under the runtime manifest/run metadata. They are historical local review claims,
+not a fresh guarantee of current upstream correctness. No new upstream patches
+were applied for this handover; no comprehensive upstream audit is claimed.
+
+16. FIRST MESSAGE TO THE SUCCESSOR AGENT
+
+Read this entire handover and verify current source/runtime hashes. The objective
+is actual controllable gameplay on this machine. The build remains unsuccessful.
+Start by finding the cause of the post-intro transition failure using the existing
+logs, a short CPU/GPU timeline and native thread stacks. Separate the harness's
+explicit RAM stops from the earlier rendering stall. Preserve GPU/CPU coherence
+and the required-dispatch fix. You may implement an evidence-backed fix, but
+state the falsifiable hypothesis and validation before another full game run.
+Do not repeat failed import eviction or mask invocation cache addresses. Report
+what is proven, what remains uncertain, and whether gameplay was actually reached.
+
+17. MACHINE-GENERATED APPENDICES
+The following inventory and exact configurations are captured when this document
+was generated. state.json retains their structured form for automated inspection.
+
+
+Git working tree:
+ M core/libs/prx/libSceAgcDriver/CMakeLists.txt
+ M core/libs/prx/libSceAgcDriver/Execution/include/GuestMemory.hpp
+ M core/libs/prx/libSceAgcDriver/Execution/include/VulkanDevice.hpp
+ M core/libs/prx/libSceAgcDriver/Execution/src/Driver/Dispatch/Dispatch.cpp
+ M core/libs/prx/libSceAgcDriver/Execution/src/Driver/Shaders/ShaderRegistry.cpp
+ M core/libs/prx/libSceAgcDriver/Execution/src/GuestMemory.cpp
+ M core/libs/prx/libSceAgcDriver/Execution/src/VulkanDevice.cpp
+ M core/libs/prx/libSceAgcDriver/Graphics/include/BufferPool.hpp
+ M core/libs/prx/libSceAgcDriver/Graphics/include/Context.hpp
+ M core/libs/prx/libSceAgcDriver/Graphics/include/GuestBufferMemory.hpp
+ M core/libs/prx/libSceAgcDriver/Graphics/include/Recorder.hpp
+ M core/libs/prx/libSceAgcDriver/Graphics/include/Resources.hpp
+ M core/libs/prx/libSceAgcDriver/Graphics/include/ShaderResources.hpp
+ M core/libs/prx/libSceAgcDriver/Graphics/include/Texture.hpp
+ M core/libs/prx/libSceAgcDriver/Graphics/src/BufferPool.cpp
+ M core/libs/prx/libSceAgcDriver/Graphics/src/Draw.cpp
+ M core/libs/prx/libSceAgcDriver/Graphics/src/GuestBufferMemory.cpp
+ M core/libs/prx/libSceAgcDriver/Graphics/src/Recorder.cpp
+ M core/libs/prx/libSceAgcDriver/Graphics/src/Resources.cpp
+ M core/libs/prx/libSceAgcDriver/Graphics/src/ShaderResources.cpp
+ M core/libs/prx/libSceAgcDriver/Graphics/src/State.cpp
+ M core/libs/prx/libSceAgcDriver/Graphics/src/Texture.cpp
+ M core/libs/prx/libSceAgcDriver/PostCompile.cmake
+ M core/libs/prx/libSceAgcDriver/tests/BufferPool.cpp
+ M core/libs/prx/libSceAgcDriver/tests/Graphics.cpp
+ M core/libs/prx/libSceAgcDriver/tests/Recorder.cpp
+ M core/libs/prx/libSceAgcDriver/tests/SharedWrites.cpp
+ M core/libs/prx/libSceAgcDriver/tests/execution/PreparedShaders.cpp
+ M core/libs/prx/libSceAgcDriver/tools/DispatchRun.cpp
+ M core/libs/prx/libSceAgcDriver/tools/ShaderReplay.cpp
+ M core/libs/prx/libSceVideoOut/include/VideoOutDriver.hpp
+ M core/libs/prx/libSceVideoOut/src/VideoOutDriver.cpp
+ M core/libs/prx/libSceVideoOut/tests/Flip.cpp
+ M core/libs/prx/libc/include/GuestArena.hpp
+ M core/libs/prx/libc/include/WindowsMappings.hpp
+ M core/libs/prx/libc/src/GuestArena.cpp
+ M core/libs/prx/libkernel/CMakeLists.txt
+ M core/libs/prx/libkernel/DirectMemory/DirectMemory.cpp
+ M core/libs/prx/libkernel/DirectMemory/Export.cpp
+ M core/libs/tests/GuestMemory.cpp
+ M core/shader/recompiler/IntermediateRepresentation/include/IntermediateRepresentation/IrProgram.hpp
+ M core/shader/recompiler/IntermediateRepresentation/src/IrProgram.cpp
+ M core/shader/recompiler/Recompiler.cpp
+?? core/libs/prx/libSceAgcDriver/Execution/include/InvocationCapture.hpp
+?? core/libs/prx/libSceAgcDriver/Execution/include/InvocationDiskCache.hpp
+?? core/libs/prx/libSceAgcDriver/Execution/include/PreparationQueue.hpp
+?? core/libs/prx/libSceAgcDriver/Execution/include/ProcessMemoryPhase.hpp
+?? core/libs/prx/libSceAgcDriver/Graphics/include/HeapReclaim.hpp
+?? core/libs/prx/libSceAgcDriver/Graphics/include/HeapWritebackSnapshot.hpp
+?? core/libs/prx/libSceAgcDriver/Graphics/include/MemoryAccounting.hpp
+?? core/libs/prx/libSceAgcDriver/Graphics/include/MemoryLedger.hpp
+?? core/libs/prx/libSceAgcDriver/Graphics/include/VramBudget.hpp
+?? core/libs/prx/libSceAgcDriver/Graphics/include/WorkingSetTrim.hpp
+?? core/libs/prx/libSceAgcDriver/Graphics/src/MemoryAccounting.cpp
+?? core/libs/prx/libSceAgcDriver/Graphics/src/MemoryLedger.cpp
+?? core/libs/prx/libSceAgcDriver/Graphics/src/VramBudget.cpp
+?? core/libs/prx/libSceAgcDriver/tests/HeapReclaim.cpp
+?? core/libs/prx/libSceAgcDriver/tests/HostImportRetireHold.cpp
+?? core/libs/prx/libSceAgcDriver/tests/InvocationDiskCache.cpp
+?? core/libs/prx/libSceAgcDriver/tests/IrReclaim.cpp
+?? core/libs/prx/libSceAgcDriver/tests/MemoryAccounting.cpp
+?? core/libs/prx/libSceAgcDriver/tests/WorkingSetTrim.cpp
+?? core/libs/prx/libSceAgcDriver/tests/execution/DeviceHeapMirrors.cpp
+?? core/libs/prx/libSceAgcDriver/tests/execution/ImportFirstHeap.cpp
+?? core/libs/prx/libSceAgcDriver/tests/execution/PreparationQueue.cpp
+
+Exact latest diagnostic environment:
+{
+  "APS5_WIDE_BINDLESS": "1",
+  "APS5_SUBROUTINE_CALLS": "1",
+  "APS5_BINDLESS_STORAGE_TABLES": "1",
+  "APS5_NULL_UNRESOLVED_IMAGES": "1",
+  "APS5_BACKGROUND_PIPELINE_WORDS": "1000000",
+  "APS5_EAGER_LINEAR_WRITEBACK": "1",
+  "APS5_DEPTH_CLEAR_DRAWS": "1",
+  "APS5_PS_STATE_FROM_SHADER": "1",
+  "APS5_IGNORE_CONSERVATIVE_Z": "1",
+  "APS5_IGNORE_POPS": "1",
+  "APS5_TOLERATE_DISPATCH": "1",
+  "APS5_NO_SNAPSHOT_CHECK": "1",
+  "APS5_NO_RESULT_MEMO": "1",
+  "APS5_GPU_CHECKPOINTS": "1",
+  "APS5_RESERVE_HONOR_HINT": "1",
+  "APS5_AMM_RANGE_GIB": "11",
+  "APS5_DRAW_SNAPSHOT_MAX_MIB": "32",
+  "APS5_DISPATCH_CACHE_ENTRIES": "64",
+  "APS5_RESOURCE_CACHE_ENTRIES": "32",
+  "APS5_DUMP_FRAMES": "128",
+  "APS5_DUMP_SCALE": "4",
+  "APS5_DUMP_FRAMES_EVERY": "16",
+  "APS5_PROFILE_DRAW": "1",
+  "APS5_HOST_IMPORT_MIB": "8192",
+  "APS5_PREFER_HOST_IMPORTS": "1",
+  "APS5_HOST_IMPORT_WINDOW_MIB": "128",
+  "APS5_TRACE_HOST_IMPORT": "1",
+  "APS5_NO_WHOLE_RANGE_IMPORT": "1",
+  "APS5_DEVICE_HEAP_MIRRORS": "1",
+  "APS5_DEVICE_HEAP_DESCRIPTOR_MIRRORS": "1",
+  "APS5_REUSE_DEVICE_HEAP_MIRRORS": "1",
+  "APS5_FILE_BACKED_DIRECT_MEMORY": "1",
+  "APS5_TRACE_MEMORY": "1",
+  "APS5_TRIM_MIRROR_WORKING_SET_MIB": "4096",
+  "APS5_TRIM_SOURCE_RANGE": "1",
+  "APS5_TRIM_REFRESH_SOURCE_RANGE": "1",
+  "APS5_TRIM_PRESSURE_SOURCE_FREE_MIB": "2048",
+  "APS5_STREAM_HEAP_WRITEBACK_MIB": "64",
+  "APS5_HEAP_MIRROR_MIB": "8192",
+  "APS5_TRACE_GPU_MEMORY": "1",
+  "APS5_HEAP_OPTIMIZE_FREE_MIB": "4096",
+  "APS5_MEMORY_LEDGER": "1",
+  "APS5_TRACE_IR_RECLAIM": "1",
+  "APS5_DEMAND_REGISTRATION_PREPARE": "1",
+  "APS5_PREPARE_WORKERS": "2",
+  "APS5_PREPARE_QUEUE_MIB": "64",
+  "APS5_PREPARE_QUEUE_ENTRIES": "32",
+  "APS5_RECORDER_KEPT_MIB": "128",
+  "APS5_STAGING_POOL_MIB": "64",
+  "APS5_HOST_BUFFER_POOL_MIB": "64",
+  "APS5_TEXTURE_CACHE_MIB": "1024",
+  "APS5_UNIT_SHADOW_MIB": "1024",
+  "APS5_DISK_INVOCATION_MIN_CODE_WORDS": "20000",
+  "APS5_TRACE_PIPELINE_DIR": "C:\\Users\\pc\\Documents\\Codex\\2026-10-10\\github-plugin-github-openai-curated-remote\\work\\research\\pipeline-inputs-20261013T002845094499Z",
+  "APS5_DIAGNOSTIC_SESSION": "20261013T002845Z-3b4b885f"
+}
+
+Normal launcher (current file; includes preflight guards):
+"""Run the verified local test without the Codex desktop or a debugger."""
+import argparse
+import csv
+import ctypes
+import datetime
+import hashlib
+import json
+from pathlib import Path
+import runpy
+import shutil
+import subprocess
+import sys
+
+from windows_capture_resources import MemoryStatus, kernel
+
+RESEARCH = Path(__file__).resolve().parent
+ROOT = RESEARCH.parents[1]
+RUNS = ROOT / 'work/wolverine-michon-runs'
+LAUNCHER = RESEARCH / 'launch_michon.py'
+OPTIONS = [
+    '--seconds', '900', '--host-import-mib', '8192', '--prefer-host-imports',
+    '--host-import-window-mib', '128', '--trace-host-import', '--no-whole-range-import',
+    '--device-heap-mirrors', '--device-heap-descriptor-mirrors', '--reuse-device-heap-mirrors',
+    '--file-backed-direct-memory', '--trim-mirror-free-mib', '4096',
+    '--trim-source-range', '--trim-refresh-source-range',
+    '--trim-pressure-source-free-mib', '2048', '--heap-mirror-mib', '8192',
+    '--stream-heap-writeback-mib', '64',
+    '--trace-gpu-memory', '--memory-ledger', '--allocation-audit', '--trace-ir-reclaim',
+    '--prepare-workers', '2', '--prepare-queue-mib', '64', '--prepare-queue-entries', '32',
+    '--resource-cache-entries', '32', '--dispatch-cache-entries', '64',
+    '--recorder-kept-mib', '128', '--staging-pool-mib', '64', '--host-buffer-pool-mib', '64',
+    '--texture-cache-mib', '1024', '--unit-shadow-mib', '1024',
+    '--heap-optimize-free-mib', '4096', '--demand-registration-prepare',
+    '--dump-every', '16', '--frame-limit', '128',
+]
+
+
+def preflight():
+    manifest = json.loads((RESEARCH / 'michon-staged-runtime.json').read_text())
+    runtime = Path(manifest['runtime'])
+    for entry in manifest['files']:
+        with (runtime / entry['path']).open('rb') as stream:
+            actual = hashlib.file_digest(stream, 'sha256').hexdigest()
+        if actual != entry['sha256']:
+            raise RuntimeError(f"Runtime verification failed: {entry['path']}")
+    tasks = subprocess.check_output(
+        ['tasklist.exe', '/FI', 'IMAGENAME eq wolverine.exe', '/FO', 'CSV', '/NH'],
+        text=True, encoding='utf-8', errors='replace')
+    if any(row and row[0].lower() == 'wolverine.exe' for row in csv.reader(tasks.splitlines())):
+        raise RuntimeError('Wolverine is already running. Close that run before starting another.')
+    status = MemoryStatus(length=ctypes.sizeof(MemoryStatus))
+    if not kernel.GlobalMemoryStatusEx(ctypes.byref(status)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    disk = shutil.disk_usage(runtime).free
+    gib = 1024 ** 3
+    print(f'Available RAM: {status.physical_available / gib:.2f} GiB', flush=True)
+    print(f'Available commit: {status.commit_available / gib:.2f} GiB', flush=True)
+    print(f'Free disk: {disk / gib:.2f} GiB', flush=True)
+    if status.physical_available < 4 * gib:
+        raise RuntimeError('Less than 4 GiB RAM is available. Close unused apps and try again.')
+    if status.commit_available < 4 * gib:
+        raise RuntimeError('Less than 4 GiB commit headroom is available. Close unused apps and try again.')
+    if disk < 12 * gib:
+        raise RuntimeError('Less than 12 GiB disk is free. This logged run needs more headroom.')
+    return {
+        'checked_utc': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        'physical_available': status.physical_available,
+        'commit_available': status.commit_available, 'disk_free': disk,
+        'launcher_options': OPTIONS,
+        'driver_sha256': next(e['sha256'] for e in manifest['files']
+                              if Path(e['path']).name == 'libSceAgcDriver.prx'),
+    }
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--check-only', action='store_true', help='Verify files and RAM without starting the game')
+    args = parser.parse_args()
+    checked = preflight()
+    if args.check_only:
+        subprocess.run([sys.executable, str(LAUNCHER), *OPTIONS, '--check-only'], check=True)
+        print('Verification passed. No game was started.')
+        return 0
+    (RESEARCH / 'standalone-preflight.json').write_text(json.dumps(checked, indent=2))
+    previous = {p.name for p in RUNS.iterdir() if p.is_dir()} if RUNS.exists() else set()
+    print('\nStarting the current local fixes. Codex does not need to be open.', flush=True)
+    print('Leave this console open while playing. Close the game window to finish.', flush=True)
+    print('This test stops at 15 minutes, or sooner below 1 GiB RAM, 8 GiB disk,', flush=True)
+    print('or 256 MiB commit headroom. A guard stop is recorded separately from a crash.', flush=True)
+    sys.argv = [str(LAUNCHER), *OPTIONS]
+    try:
+        runpy.run_path(str(LAUNCHER), run_name='__main__')
+    finally:
+        new_runs = sorted(p for p in RUNS.iterdir() if p.is_dir() and p.name not in previous)
+        if new_runs:
+            run = new_runs[-1]
+            (RESEARCH / 'WOLVERINE_LAST_RUN.txt').write_text(str(run) + '\n')
+            print(f'\nSaved logs: {run}', flush=True)
+            if (run / 'run.json').exists():
+                result = json.loads((run / 'run.json').read_text())
+                print(f"Stop reason: {json.dumps(result.get('limit_stop'))}", flush=True)
+                print(f"Natural exit: {result.get('natural_exit')}; exit code: {result.get('exit_code')}", flush=True)
+    return 0
+
+
+if __name__ == '__main__':
+    try:
+        raise SystemExit(main())
+    except Exception as error:
+        print(f'\nCould not complete the run: {error}', file=sys.stderr, flush=True)
+        raise SystemExit(1)
+
+
+Latest extracted snapshot records:
+[heap-writeback-snapshot] mode=bounded original_bytes=2868903936 stored_bytes=462094336 uniform_bytes=2406809600 ram_metadata=700480 scratch_peak_bound=33554432 io_write_calls=32 capture_ms=2760.350
+[heap-writeback-snapshot] mode=bounded original_bytes=2868903936 stored_bytes=462094336 uniform_bytes=2406809600 ram_metadata=700480 scratch_peak_bound=33554432 io_write_calls=32 capture_ms=813.766
+[heap-writeback-snapshot] mode=bounded original_bytes=2868903936 stored_bytes=462094336 uniform_bytes=2406809600 ram_metadata=700480 scratch_peak_bound=33554432 io_write_calls=32 capture_ms=3911.130
+[heap-writeback-snapshot] mode=bounded original_bytes=2868903936 stored_bytes=462094336 uniform_bytes=2406809600 ram_metadata=700480 scratch_peak_bound=33554432 io_write_calls=32 capture_ms=5177.438
+[heap-writeback-snapshot] mode=bounded original_bytes=2868903936 stored_bytes=462094336 uniform_bytes=2406809600 ram_metadata=700480 scratch_peak_bound=33554432 io_write_calls=32 capture_ms=3448.559
+[heap-writeback-snapshot] mode=bounded original_bytes=2868903936 stored_bytes=462094336 uniform_bytes=2406809600 ram_metadata=700480 scratch_peak_bound=33554432 io_write_calls=32 capture_ms=2557.452
+[heap-writeback-snapshot] mode=bounded original_bytes=2868903936 stored_bytes=462094336 uniform_bytes=2406809600 ram_metadata=700480 scratch_peak_bound=33554432 io_write_calls=32 capture_ms=7764.160
+[heap-writeback-snapshot] mode=bounded original_bytes=2868903936 stored_bytes=462094336 uniform_bytes=2406809600 ram_metadata=700480 scratch_peak_bound=33554432 io_write_calls=32 capture_ms=6508.956
+[heap-writeback-snapshot] mode=bounded original_bytes=2868903936 stored_bytes=462094336 uniform_bytes=2406809600 ram_metadata=700480 scratch_peak_bound=33554432 io_write_calls=32 capture_ms=3302.932
+[heap-writeback-snapshot] mode=bounded original_bytes=2868903936 stored_bytes=462094336 uniform_bytes=2406809600 ram_metadata=700480 scratch_peak_bound=33554432 io_write_calls=32 capture_ms=3379.472
+[heap-writeback-snapshot] mode=bounded original_bytes=2868903936 stored_bytes=462094336 uniform_bytes=2406809600 ram_metadata=700480 scratch_peak_bound=33554432 io_write_calls=32 capture_ms=1326.785
+[heap-writeback-snapshot] mode=bounded original_bytes=2868903936 stored_bytes=462094336 uniform_bytes=2406809600 ram_metadata=700480 scratch_peak_bound=33554432 io_write_calls=32 capture_ms=3358.807
+[heap-writeback-snapshot] mode=bounded original_bytes=2868903936 stored_bytes=462094336 uniform_bytes=2406809600 ram_metadata=700480 scratch_peak_bound=33554432 io_write_calls=32 capture_ms=4366.325
+[heap-writeback-snapshot] mode=bounded original_bytes=2868903936 stored_bytes=462094336 uniform_bytes=2406809600 ram_metadata=700480 scratch_peak_bound=33554432 io_write_calls=32 capture_ms=1925.678
+[heap-writeback-snapshot] mode=bounded original_bytes=2868903936 stored_bytes=462094336 uniform_bytes=2406809600 ram_metadata=700480 scratch_peak_bound=33554432 io_write_calls=32 capture_ms=2690.632
+
+Current changed source SHA256 (relative to source repo):
+{
+  "core/libs/prx/libSceAgcDriver/CMakeLists.txt": "ca67f122549647032aee0d9e3a388a8a7cffd485d9ddffc1b1f691f22a05c474",
+  "core/libs/prx/libSceAgcDriver/Execution/include/GuestMemory.hpp": "94cfa7eb03fd8e224c15220cf29b9b0d69dfdb778a2f713a7b9073c58530631e",
+  "core/libs/prx/libSceAgcDriver/Execution/include/InvocationCapture.hpp": "089852432c8322701389a12686f06358fc7bbe15c8b6f912b34ceec2c2183f2d",
+  "core/libs/prx/libSceAgcDriver/Execution/include/InvocationDiskCache.hpp": "385e503b2d03315d7da3a26d74ee3c2159414c2f54becf023eb23634bbd55bb2",
+  "core/libs/prx/libSceAgcDriver/Execution/include/PreparationQueue.hpp": "41e3ed1ff756a2d1cb0f953508c4f398d0c7906ff03378d9e7912016a5faf655",
+  "core/libs/prx/libSceAgcDriver/Execution/include/ProcessMemoryPhase.hpp": "c673a3984102f87ea0bb01d430ef6773945a5d7eaf7c9b2b0a633b0352f236c3",
+  "core/libs/prx/libSceAgcDriver/Execution/include/VulkanDevice.hpp": "f8ac42961080801b28e2b95cab0ec0c8785fe8a5354cb3366714b779453a1488",
+  "core/libs/prx/libSceAgcDriver/Execution/src/Driver/Dispatch/Dispatch.cpp": "8f42052de0a9e0364a2868b72812cc35caae7c9ae7717ae6560b78b7b14ffd72",
+  "core/libs/prx/libSceAgcDriver/Execution/src/Driver/Shaders/ShaderRegistry.cpp": "3eacd17653ccfdc99e3d41eabac737ba89b0364967196fc078b726313448a3d3",
+  "core/libs/prx/libSceAgcDriver/Execution/src/GuestMemory.cpp": "dbc1296fe3248365918e79ce5e2a0b339616888f805f836ffc9abefb565d2160",
+  "core/libs/prx/libSceAgcDriver/Execution/src/VulkanDevice.cpp": "dc50d01f2f7d46af9ec19e4ac9915bccfe7cb9bebb2cd4729e2c37e3f5f2bfb2",
+  "core/libs/prx/libSceAgcDriver/Graphics/include/BufferPool.hpp": "321850b326934123f59cbadef8f54a685aa687adeb8a5a1cd5c115f3b0c5c665",
+  "core/libs/prx/libSceAgcDriver/Graphics/include/Context.hpp": "0ea32684d1915c4892ba168b36ac10b8e311b0f32075a348d3016ff911504014",
+  "core/libs/prx/libSceAgcDriver/Graphics/include/GuestBufferMemory.hpp": "41a155f68c9b21852337b51fd992c3ca9669595f391e77c5785fccf31cc39856",
+  "core/libs/prx/libSceAgcDriver/Graphics/include/HeapReclaim.hpp": "269636be8f4504bb85646c005c86119caa7dc984c15353d74c8e3488cb8b7a35",
+  "core/libs/prx/libSceAgcDriver/Graphics/include/HeapWritebackSnapshot.hpp": "0743fe4dcd5af237d6ffce0d46c43f1e7e29bccd39fe31296c292733691ce7e6",
+  "core/libs/prx/libSceAgcDriver/Graphics/include/MemoryAccounting.hpp": "7d9568a6d3fee816aa674c4a4d532bc97bdf62eb907318d0cc4e73d7d57048b5",
+  "core/libs/prx/libSceAgcDriver/Graphics/include/MemoryLedger.hpp": "9759414f7932d27f67698545d1ea8ec5aa0559565272fcbe4cdc06d7236306bc",
+  "core/libs/prx/libSceAgcDriver/Graphics/include/Recorder.hpp": "a116b2365f05ba5c55410c332383e3a212615f1a30f9fc9e4fa976b091a1ddd1",
+  "core/libs/prx/libSceAgcDriver/Graphics/include/Resources.hpp": "f566010c4bc0c7a0f87226d8780c35f580d7c1af3b151f114747bc5f0bfc4294",
+  "core/libs/prx/libSceAgcDriver/Graphics/include/ShaderResources.hpp": "8d6f083d71c1d93556b70083d0543bd61419716ed9344c1320e69c17c847a894",
+  "core/libs/prx/libSceAgcDriver/Graphics/include/Texture.hpp": "3b9bda56fa37779637ce0deb19715ea08fa8a9a1b2333437cada6e0f0ee5bc85",
+  "core/libs/prx/libSceAgcDriver/Graphics/include/VramBudget.hpp": "fd9a5cbe7be1fccd2ebdff87fab15756ad3fd4c95a405fa1857923b09400b609",
+  "core/libs/prx/libSceAgcDriver/Graphics/include/WorkingSetTrim.hpp": "3a79d6e9106fc65548cccef43d8ce591e439dcf80eda8d70cd35cd4e7604ec1a",
+  "core/libs/prx/libSceAgcDriver/Graphics/src/BufferPool.cpp": "699241f6c96aca66f2f357c53eefac86252e92d213b31c6db938137490d76dec",
+  "core/libs/prx/libSceAgcDriver/Graphics/src/Draw.cpp": "76243c5f4e74212e105904b6225ed6dab50d7a42557e2928468b94acd4ffba10",
+  "core/libs/prx/libSceAgcDriver/Graphics/src/GuestBufferMemory.cpp": "0cb780fdb27c658724a5cc5ffd147772a7ddbe62570873acc92651ebce7736cb",
+  "core/libs/prx/libSceAgcDriver/Graphics/src/MemoryAccounting.cpp": "3feb29c4c0675d38a13739044369ed08db4281322386ba6975d049515ab386e9",
+  "core/libs/prx/libSceAgcDriver/Graphics/src/MemoryLedger.cpp": "93c7ecc1643ab75e58d48592c7475ce982ae1a2de4b75e15ced37f10907d3a83",
+  "core/libs/prx/libSceAgcDriver/Graphics/src/Recorder.cpp": "14540e81057388150335583a3c5fe0926f88af0b72ae878b9b2300b05058f6a3",
+  "core/libs/prx/libSceAgcDriver/Graphics/src/Resources.cpp": "50370ba42a14bdbf193d5b2c79e7030ea1ef7f8366ce0eeffa73c360dab2480b",
+  "core/libs/prx/libSceAgcDriver/Graphics/src/ShaderResources.cpp": "d604176d5c5a777e5ad1af95b5b8e1a136a92f3904c1da7706838fdaf750d1d8",
+  "core/libs/prx/libSceAgcDriver/Graphics/src/State.cpp": "bc6ac9d9c40857b6b97622ff138f136e77d8541c042154ac98fb1d68f19e3ea0",
+  "core/libs/prx/libSceAgcDriver/Graphics/src/Texture.cpp": "f9d31473a54357c93a90c3685bac55f137641d388c27e0b082ee3ecbbb84e084",
+  "core/libs/prx/libSceAgcDriver/Graphics/src/VramBudget.cpp": "a031cbab52425dc2ded424e159e07bd4148a6488cdc4aa214fc84a560ce721a3",
+  "core/libs/prx/libSceAgcDriver/PostCompile.cmake": "9ce24a176f9a341a842e4ee3a017ec96616310fe7bc8f6ea9a03a0351a596a8b",
+  "core/libs/prx/libSceAgcDriver/tests/BufferPool.cpp": "f8eb913f68a67747321b655370e8dc57c05a07e0a6ed5fd96b19bcd025b797e1",
+  "core/libs/prx/libSceAgcDriver/tests/Graphics.cpp": "3c4e2ccb1839d7409a2658c0af17ecd72bf5e35ff1e6805a76dbf9eff0bd15a9",
+  "core/libs/prx/libSceAgcDriver/tests/HeapReclaim.cpp": "d325a905c37e0a572ed59c4d7d320a1d9a13efb92bead4c636e4ebaa7bf3eb8f",
+  "core/libs/prx/libSceAgcDriver/tests/HostImportRetireHold.cpp": "55d81eeed24f7804831595ab13a4da13cd24feab42096bacab3f0bdacfb17009",
+  "core/libs/prx/libSceAgcDriver/tests/InvocationDiskCache.cpp": "b7128633af8f4e80b7f946dc8b32c349ef70ffec2491dfb63b4b57d47a74832a",
+  "core/libs/prx/libSceAgcDriver/tests/IrReclaim.cpp": "2e0979126602821c88b800632f68513167e073769ecb65949ecaede44397b6e0",
+  "core/libs/prx/libSceAgcDriver/tests/MemoryAccounting.cpp": "667c73c5e8be9354cf58b87672eb179fd461c8225eaa647be5f50975ca7ebac2",
+  "core/libs/prx/libSceAgcDriver/tests/Recorder.cpp": "d8cc3f9a7697022b35832ffa6a1664a1b02a7c24dad6bf29c5b08cc6fc8e3206",
+  "core/libs/prx/libSceAgcDriver/tests/SharedWrites.cpp": "3669ada9df75ebe5fc77a14f6a9cc25694a86b6ef16ac5e7d31ca045d8d52ac4",
+  "core/libs/prx/libSceAgcDriver/tests/WorkingSetTrim.cpp": "f6fd42a43fcfb6cdf0298470eb5759aa87774fb5432683f2bdaa2fcd89c36b92",
+  "core/libs/prx/libSceAgcDriver/tests/execution/DeviceHeapMirrors.cpp": "49b4a49b759f8b260f35e629fe146fefa9769fce412ae89bbb87a5f627a40e1f",
+  "core/libs/prx/libSceAgcDriver/tests/execution/ImportFirstHeap.cpp": "475913266becab2e804527aa7e0519ca44263a78a1a48e498ea96868f4154681",
+  "core/libs/prx/libSceAgcDriver/tests/execution/PreparationQueue.cpp": "454c65149a00bd1589799b68b04f7670810cfee2f921a3b1b681318d27ad4031",
+  "core/libs/prx/libSceAgcDriver/tests/execution/PreparedShaders.cpp": "2f5c518c3a889722815ea187d41235a66244072ae831d85224ad72b5adca8bfe",
+  "core/libs/prx/libSceAgcDriver/tools/DispatchRun.cpp": "845c0db1fe7fbf36d7435fc7eea3c4927006256bfdfbd38c36f7b966a7868d51",
+  "core/libs/prx/libSceAgcDriver/tools/ShaderReplay.cpp": "e3947291cc67e1772ee8546d006eb6d94fdcb50c2067aa9e8139561e8a0ba5aa",
+  "core/libs/prx/libSceVideoOut/include/VideoOutDriver.hpp": "c7df303bac252b9cfc4590133712e1c831b77592c2019c24c11867286f142604",
+  "core/libs/prx/libSceVideoOut/src/VideoOutDriver.cpp": "b7583c348166bef8fc0d57dbd5864f96c8b905aac9337884e7e5eff64ce50e15",
+  "core/libs/prx/libSceVideoOut/tests/Flip.cpp": "4107a03066819109c90d91f7b537563d0817d42eaf7730463667df5dbdc9508a",
+  "core/libs/prx/libc/include/GuestArena.hpp": "8bc88940dd54a9b3e68bfb4f042e85cf570b690d2e9c327c12f93fafeff88d69",
+  "core/libs/prx/libc/include/WindowsMappings.hpp": "187d0ee2bed7e76e5433e26e351f305c102587189ec979710e083e1ac0ba540a",
+  "core/libs/prx/libc/src/GuestArena.cpp": "23b094dc4179ccf6b138388e846abead0504cd2f6bebb202d4f605d2c9fce99a",
+  "core/libs/prx/libkernel/CMakeLists.txt": "e556d04b7b7272747360b7b08e8d268e3ef91aa13ea4bd7b29a9373a2a849a71",
+  "core/libs/prx/libkernel/DirectMemory/DirectMemory.cpp": "1f268a13f79224161f7bf1cb8368ce4455681f626bd320c4afd2cafe0963889c",
+  "core/libs/prx/libkernel/DirectMemory/Export.cpp": "1e125679920d26c69176226328a571ca2a549167b8d65b1c10e5483a7950d5f1",
+  "core/libs/tests/GuestMemory.cpp": "77cadbeacd00cf7e9abc5b6da615fe03b631bf530b44333fdbfc300b2f573892",
+  "core/shader/recompiler/IntermediateRepresentation/include/IntermediateRepresentation/IrProgram.hpp": "3b8b36584b14a6bd023c4da8a8249025b35616177dea5432a00f0a4a8a521b36",
+  "core/shader/recompiler/IntermediateRepresentation/src/IrProgram.cpp": "5ecc1e9a7e49b6681023b62d197dae326b577e0658c6527fbfd986a37fe54dd1",
+  "core/shader/recompiler/Recompiler.cpp": "dd57acb1e137183a9904d33e408f16880266f04d88420685bf91a63f788548c3"
+}
+
+END. No playability claim.

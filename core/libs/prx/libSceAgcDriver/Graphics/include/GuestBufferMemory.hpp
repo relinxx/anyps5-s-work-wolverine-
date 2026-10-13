@@ -12,6 +12,8 @@
 
 namespace AgcDriver::Graphics {
 
+struct HeapWritebackSnapshot;
+
 void ShutdownGuestBufferWorkers();
 
 struct GuestMemorySnapshot {
@@ -32,6 +34,9 @@ struct HostImport {
     std::uint64_t serial = 0;
     bool unwatched = false;
     mutable std::uint64_t lastUse = 0;
+    mutable std::uint64_t readBindings = 0;
+    mutable std::uint64_t writeBindings = 0;
+    mutable std::uint64_t lastGpuBindingMs = 0;
     bool dmaBuf = false;
     // A whole-range import for a descriptor that binds the range (see UploadFinish): least-recently-used eviction
     // passes it by, since its cells could not be merged back while recorded work holds them.
@@ -63,6 +68,14 @@ void DropAddressSpaceCache();
 // the device's pool while the device lives, not at static destruction.
 void ClearImageMirrors(VkDevice device);
 std::uint64_t HostImportLimit();
+// Installs the opt-in registration-time write-watch baseline observer for one diagnostic run.
+void InitializeHostImportZeroAudit();
+// Ranked live-import census, grouped by the owning registered guest allocation.
+std::string DescribeHostImportCensus();
+// Under the GPU lock: retire old imports through the recorder's hold/fence lifetime. Large
+// writable or unknown-protection guest ranges, whole-range imports and current-build pointers
+// are protected. Returns bytes retired from the cache, not necessarily bytes already unpinned.
+std::uint64_t RetireIdleHostImports(const Context& context, std::uint64_t wanted);
 
 // The host import of the registered allocation containing [address, address + bytes), made on demand
 // (alignment and budget permitting), or null. Bytes at `address` are at `address - import->base` in
@@ -166,8 +179,18 @@ struct MirrorStats {
     std::uint64_t heapRefills = 0;
     std::uint64_t sweeps = 0;
     std::uint64_t heapChecks = 0;
+    std::uint64_t deviceHeapMirrors = 0;
+    std::uint64_t deviceHeapBytes = 0;
 };
 MirrorStats MirrorCounters();
+// APS5_GPU_HEAP_COMPARE write-backs since start: GPU compares run, 64 KiB blocks they found changed,
+// and bytes downloaded for those blocks (reference and result each counted once).
+struct GpuCompareStats {
+    std::uint64_t compares = 0;
+    std::uint64_t changedBlocks = 0;
+    std::uint64_t downloadedBytes = 0;
+};
+GpuCompareStats GpuCompareCounters();
 void ClearImageMirrors(VkDevice device);
 void ClearHostImports(VkDevice device);
 
@@ -184,6 +207,15 @@ public:
     explicit GuestBufferMemory(const Context& context);
     ~GuestBufferMemory();
     void AcquireRegistered();
+    // After AcquireRegistered, for a program that stores through GPU-selected descriptors or
+    // FLAT/GLOBAL addresses (CompiledShaderArtifact::bdaWrites): notes every writable device-local
+    // heap mirror in Writes(), so its BDA table entry grants stores and the exact bounded heap
+    // write-back stores what the GPU changed. Without it such a store faults and the dispatch's
+    // results are dropped. APS5_NO_BDA_MIRROR_WRITES=1 restores that.
+    void AddAddressWritableMirrors();
+    // Drops the completed bounded heap snapshots kept for the next capture of the same range
+    // (their spools are deleted on close); returns how many there were.
+    static std::size_t ReleaseRetainedSnapshots();
     // APS5_PROFILE_DRAW: the parts of one address-based build ([address] line every 10 s): the
     // registry lease, the imports pass, the mirror preparation and the mirror compare (blocks and
     // copied blocks) are timed by AcquireRegistered on the calling thread; the caller adds the
@@ -253,9 +285,16 @@ public:
     // regions was recorded (ShaderResources::MarkGpuWrites), under GuestMemory::GpuMutex. A use that
     // never calls it (a synchronous draw) stores the staging bytes from the CPU in WriteBack.
     void RecordCopyBacks(Recorder& recorder);
+    // Large bounded snapshots borrow the live mirror result: complete their batch
+    // and CPU write-back before any later GPU work can overwrite that mirror.
+    bool RequiresImmediateWriteBack() const;
+    void FinishBoundedWriteBack(Recorder& recorder);
     // Whether registered allocations are pinned until write-back (address-based shaders): by this
     // build's own lease, or by the cached address space it holds.
     bool HoldsLease() const { return !lease.empty() || space != nullptr; }
+    // Per-build CPU copies and GPU result/reference buffers. Persistent shared heap
+    // mirrors and imports are excluded; the recorder accounts these transient bytes.
+    std::size_t OwnedBufferBytes() const;
     // Every uploaded region as [begin, end) when all of them are served by host imports, in place or
     // through a device-local staging copy of the import (nothing was copied through the CPU, so the
     // upload can serve a later identical build), else nothing.
@@ -383,6 +422,21 @@ private:
     bool regionsSorted = false;
     std::vector<std::pair<std::uint64_t, std::uint64_t>> writes;
     std::vector<std::pair<std::uint64_t, std::vector<std::byte>>> heapReferences;
+    struct DeviceHeapReference {
+        std::uint64_t begin;
+        std::size_t bytes;
+        std::size_t padding;
+        std::size_t offset;
+        std::shared_ptr<ImageMirror> mirror;
+        std::shared_ptr<Buffer> original;
+        std::shared_ptr<Buffer> result;
+        bool recorded = false;
+        std::shared_ptr<HeapWritebackSnapshot> streamedOriginal;
+        // APS5_GPU_HEAP_COMPARE: the pre-work bytes kept in device memory; WriteBack compares them
+        // with the mirror on the GPU and downloads only the 64 KiB blocks that differ.
+        std::shared_ptr<Buffer> gpuOriginal;
+    };
+    std::vector<DeviceHeapReference> deviceHeapReferences;
     // UploadPrepare ran (regions are frozen); `uploaded` once UploadFinish ran.
     bool prepared = false;
     bool uploaded = false;

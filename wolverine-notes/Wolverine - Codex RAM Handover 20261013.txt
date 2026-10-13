@@ -1,0 +1,130 @@
+Wolverine / AnyPS5 - Codex handover: host RAM reduction
+Date: 2026-10-13. From: Claude (round 8). To: Codex. 
+
+ROOT = C:\Users\pc\Documents\Codex\2026-10-10\github-plugin-github-openai-curated-remote
+Source: ROOT/work/AnyPS5-michon (branch wolverine/testing, HEAD 913a29b2, dirty tree; do not reset/stash).
+Build:  ROOT/work/michon-build. Runtime: ROOT/work/wolverine-michon-runtime. Runs: ROOT/work/wolverine-michon-runs.
+Previous context: work/research/handover-20261013/HANDOVER.txt (still valid; this file supersedes its
+"next investigation" section for the memory work only).
+
+=====================================================================
+1. VERDICT (why this handover exists)
+=====================================================================
+The blocker right now is host RAM. Every recent run is stopped by the collector's physical-RAM guard
+(512 MiB diagnostic reserve) before the game reaches the post-intro loading phase:
+
+  run 20261013T002845Z-3b4b885f (old driver)  stop 285 s, process working set 10.59 GiB, start avail 9.28 GiB
+  run 20261013T011852Z-8a249c6d (new driver)  stop 221 s, working set 10.41 GiB, start avail 8.96 GiB, frame 831
+  run 20261013T014416Z-07b3d75f (new driver, user closed all apps incl. Claude)
+                                              stop 186 s, working set 12.33 GiB, frame 1075
+
+The last run shows the process grows into whatever RAM is freed. Closing apps is not a fix.
+
+Memory breakdown at the stop of 8a249c6d ([mem-ledger-backing], last line of stderr.log):
+  process working_set 10657 MiB, private_commit 7141 MiB
+  vk imported_host = 5362 MiB in 7719 allocations   <-- pinned guest pages, the largest single consumer
+  vk device_local_only = 4263 MiB / 239            (commit-charged, not RAM-resident)
+  heap0 (VRAM) driver_usage 4550 MiB of budget 11175 MiB  -> about 6.6 GiB VRAM idle
+  texture snapshots 160 MiB; IR programs about 575 MB ([ir-reclaim] totals)
+  commit_available at stop: 3.8 GiB (8a249c6d), 5.5 GiB (07b3d75f)
+
+Goal: move GPU-only/read-mostly guest data out of pinned host RAM into VRAM, so the process working
+set drops by 2-4 GiB and a run reaches the loading phase (RenderFrameIndex > ~1100, heap write-back
+snapshots appear) without the guard stopping it.
+
+=====================================================================
+2. WHAT CLAUDE CHANGED THIS ROUND (uncommitted, built, staged, tests pass)
+=====================================================================
+Staged driver: runtime libs/libSceAgcDriver.prx sha256 a740459cb14a8d2cb63e1bf83bd59d4d7ece3d6b1cbddf9762dad644932e97a1
+(manifest work/research/michon-staged-runtime.json updated; previous driver backed up in
+work/research/michon-driver-backup-20261013T011817Z). Neither change has been exercised in-game yet,
+because no run has reached the loading phase since.
+
+A. BDA stores into writable device heap mirrors (correctness).
+   Evidence: run 3b4b885f, 77 x "[gpu] deferred write-back failed: BDA access failed ... reason=2; the
+   store hit 0x1210000000+0xab000000, read-only in the BDA table" at about 280 s (instructions 0x84 and
+   0x1a8, 4-byte compute stores spread across the 2.87 GB mirrored heap). A faulting dispatch loses its
+   whole write-back (Recorder.cpp completion catch).
+   Fix: ShaderInfo::bdaWrites (already computed in ResourceTracker.cpp) is carried into
+   CompiledShaderArtifact::bdaWrites (Recompiler.hpp/.cpp, ShaderDiskCache.cpp encode/decode,
+   FormatVersion 25 -> 26). ShaderAddressResources.cpp calls new
+   GuestBufferMemory::AddAddressWritableMirrors() after AcquireRegistered for programs with bdaWrites;
+   it notes every writable device-local heap mirror (>256 MiB only when the bounded stream threshold
+   applies) in Writes(), which grants BDA Write and routes it through the exact bounded write-back.
+   Opt-out: APS5_NO_BDA_MIRROR_WRITES=1.
+   Known cost: each such dispatch takes a full-range snapshot + compare (about 1 s for 2.87 GB with B).
+   Watch [heap-writeback-snapshot] frequency once loading is reached.
+
+B. Bounded snapshot reuse (performance).
+   Evidence: run 3b4b885f, 15 snapshots of the same 2.87 GB heap, identical partition (stored
+   462,094,336 / uniform 2,406,809,600), capture_ms 0.8-7.8 s (about 53 s of a 75 s window) while the
+   matching completion read-back takes about 0.5 s: the cost was the synchronous unbuffered spool write.
+   Fix: HeapWritebackSnapshot::Recapture (byte-exact compare against the retained spool, rewrites only
+   changed mixed blocks, refuses uniform->mixed so the caller takes a fresh snapshot). GuestBufferMemory
+   keeps the last completed snapshot per (mirror, offset), max 2 entries, taken exclusively and returned
+   only after a finished compare. New static ReleaseRetainedSnapshots(). Opt-out APS5_NO_SNAPSHOT_REUSE=1.
+   Log line now has reuse=fresh|reused|layout_changed rewritten_bytes=N.
+
+Tests (all pass, logs in work/research/claude-review/tests-r8b.log, tests-r8-bda.log):
+  agc_shader_disk_cache, agc_driver_device_heap_mirrors, agc_driver_device_heap_stream_writeback
+  (new RecapturedSnapshot unit test + reuse/retention/release checks), agc_import_first_heap,
+  agc_background_pipeline_required_dispatch, agc_invocation_disk_cache, agc_driver_bda_device(+_compact),
+  agc_driver_bda_span_reads(+_compact).
+Please review A and B before building on them.
+
+Also found: the 27 s no-present gap at 176-203 s in 3b4b885f was cold pipeline building
+("[specialize] 29 modules ... the longest 19643.6 ms"), not a hang.
+
+=====================================================================
+3. THE THREE STEPS FOR CODEX
+=====================================================================
+STEP 1 - Measure (no game launch needed beyond one diagnostic run if a dump is required).
+  Add a census of live host imports, printed with the memory ledger (and once at guard stop if possible):
+  - group the 7719 imports by registered guest range (GuestAllocations range / dmem file), with total
+    bytes, count, min/max window size;
+  - per range: CPU write activity (write-watch / heap-refresh dirty blocks over time), GPU access kind
+    (read-only binding vs written), time since last GPU use, whether it is a texture/RT/buffer source;
+  - also break down the remaining ~5.3 GiB of non-import working set (IR, caches, file-backed dmem pages
+    touched by the CPU, staging pools).
+  Deliverable: a ranked table showing which few ranges hold most of the 5.4 GiB and which are read-mostly.
+
+STEP 2 - Move the biggest read-mostly ranges to VRAM, one range first.
+  Mechanism to build on (already in GuestBufferMemory.cpp): device-local heap mirrors
+  (APS5_DEVICE_HEAP_MIRRORS / acquireMirror / planSpaceMirrors), CPU dirty tracking with per-64 KiB
+  generations (prepareRefresh, refreshHeapRuns, [heap-refresh] lines), and exact GPU write-back
+  (round-8 change A + bounded snapshots B). After a range is served by a VRAM mirror, release its host
+  import (unpin) and let Windows trim the guest pages (they are file-backed dmem, so they can go to disk;
+  existing --trim-source-range / --trim-refresh-source-range paths).
+  Selection policy must be explicit and stable (by measured range, not by eviction under pressure):
+  the handover's failed experiment was pressure eviction of small windows, which caused immediate
+  re-import churn because address-space construction re-imports everything broadly registered.
+  Budget: VRAM headroom about 6.6 GiB; device-local allocations charge commit (commit_available was
+  3.8-5.5 GiB at stops), so cap the moved total and log it.
+  Tests first: exactness for CPU writes after upload, GPU writes (declared and BDA), aliasing views,
+  sparse/uncommitted pages, and that a moved range is not re-imported by the next address-space build.
+
+STEP 3 - Validate in game.
+  Same launcher and settings (work/research/round7_test_warm_game.py, 512 MiB reserve), same
+  shader-cache state. Compare against run 07b3d75f at equal RenderFrameIndex: working set,
+  imported_host MiB, VRAM usage, commit_available, FPS. Success = working set lower by >= 2 GiB at the
+  same frame and the run reaches the loading phase (snapshots / post-1100 frames). Then check whether
+  change A removes the "read-only in the BDA table" faults and whether the guest gets past the
+  post-intro transition.
+
+=====================================================================
+4. CONSTRAINTS (unchanged, still binding)
+=====================================================================
+- Local changes only: no push, PR or public comment. Do not modify original game files.
+- Do not reset, clean or stash the dirty checkout. Do not lower or remove the RAM/commit/disk guards.
+- No ProcDump or debugger attached for performance runs. Do not kill unknown Codex/Claude/helper processes.
+- Do not change pagefile, power, security/antivirus or system settings; no shutdown/restart.
+- Preserve coherence of 0x1120000000+0xac600000 (keep that import). Do not mask invocation cache key
+  bytes. Do not repeat the failed pressure-based import eviction.
+- Exact coherence only: byte comparisons, no hash-only proofs.
+- Build: $env:PATH = "ROOT/work/toolchain/mingw64/bin;$env:PATH";
+  cmake --build ./work/michon-build --target libs <test targets> -j4
+- Stage with work/research/stage_michon_driver.py. Note: it needs git on PATH
+  (C:\Users\pc\.cache\codex-runtimes\codex-primary-runtime\dependencies\native\git\cmd) or it copies the
+  driver and then fails before updating the manifest (happened this round; manifest was fixed by hand).
+- Logs are many MB: search, never load whole. Receipt-time mapping helper:
+  work/research/claude-review/run_timeline.py <run_dir> <regex> [...]

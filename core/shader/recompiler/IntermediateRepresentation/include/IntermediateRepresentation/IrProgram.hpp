@@ -3,6 +3,7 @@
 
 #include "IntermediateRepresentation/IrBlock.hpp"
 #include "IntermediateRepresentation/IrMetadata.hpp"
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -29,6 +30,10 @@ public:
     CompiledShaderInfo TakeCompiledInfo() &&;
     IrValue& CreateValue(IrOpcode opcode, IrType type, std::uint64_t flags);
     void SetEntryBlock(IrBlock& block);
+    // Releases values unreachable from block instructions, the SSA construction tables, program
+    // metadata and the resource plan. Live value IDs are kept. `releasedBytes`, when given,
+    // receives an estimate of the IR object storage released (objects and their pointer vectors).
+    std::size_t ReclaimUnusedValues(std::size_t* releasedBytes = nullptr);
     [[nodiscard]] std::vector<IrBlock*>& BlockOrder();
     [[nodiscard]] const std::vector<IrBlock*>& BlockOrder() const;
 

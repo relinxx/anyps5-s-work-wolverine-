@@ -12,7 +12,7 @@ add_custom_command(
 
 foreach(agcTarget IN ITEMS libSceAgcDriver agc_driver_visual_test agc_driver_graphics_tests agc_driver_bda_device_tests agc_driver_mesh_tests)
     if(TARGET ${agcTarget})
-        target_sources(${agcTarget} PRIVATE Graphics/src/BufferPool.cpp)
+        target_sources(${agcTarget} PRIVATE Graphics/src/BufferPool.cpp Graphics/src/VramBudget.cpp)
     endif()
 endforeach()
 
@@ -37,6 +37,25 @@ add_custom_command(
 foreach(agcTarget IN ITEMS libSceAgcDriver agc_driver_visual_test agc_driver_graphics_tests agc_driver_bda_device_tests agc_driver_mesh_tests)
     if(TARGET ${agcTarget})
         target_sources(${agcTarget} PRIVATE Graphics/src/GpuColorTransfer.cpp ${agcColorTransferHeader} ${agcThreadGroupsHeader})
+    endif()
+endforeach()
+
+# Exact per-64 KiB-block compare of a device heap mirror against its pre-dispatch device copy
+# (GuestBufferMemory's GPU-compared write-back).
+set(agcHeapCompareSource ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/shaders/HeapCompare.comp)
+set(agcHeapCompareSpv ${agcTextureDetileGeneratedDir}/HeapCompare.spv)
+set(agcHeapCompareHeader ${agcTextureDetileGeneratedDir}/HeapCompare_spv.h)
+add_custom_command(
+    OUTPUT "${agcHeapCompareHeader}"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${agcTextureDetileGeneratedDir}"
+    COMMAND "$<TARGET_FILE:glslang-standalone>" -V --target-env vulkan1.1 -o "${agcHeapCompareSpv}" "${agcHeapCompareSource}"
+    COMMAND ${CMAKE_COMMAND} -DINPUT=${agcHeapCompareSpv} -DOUTPUT=${agcHeapCompareHeader} -DSYMBOL=HEAP_COMPARE_SPV -P "${CMAKE_CURRENT_SOURCE_DIR}/embed_spirv.cmake"
+    DEPENDS "${agcHeapCompareSource}" glslang-standalone
+    VERBATIM
+)
+foreach(agcTarget IN ITEMS libSceAgcDriver agc_driver_graphics_tests)
+    if(TARGET ${agcTarget})
+        target_sources(${agcTarget} PRIVATE ${agcHeapCompareHeader})
     endif()
 endforeach()
 

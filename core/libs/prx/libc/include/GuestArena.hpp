@@ -39,6 +39,16 @@ void GuestArenaSetPrivateMappingObserver_nid_postfix(void (*callback)(std::uintp
 void GuestArenaMap_nid_postfix(void* pointer, std::size_t bytes, void* section, std::uint64_t offset, std::uint32_t protection);
 void* GuestArenaMapAlias_nid_postfix(std::uintptr_t address, std::size_t bytes);
 void GuestArenaUnmapAlias_nid_postfix(void* alias);
+// One process-wide lock for operations that change which pages are locked in the working set:
+// guest mlock (libkernel VirtualLock) and the driver's query-then-VirtualUnlock source-page trim.
+// Holding it across the trim's query and unlock means a page cannot be locked in between.
+void GuestArenaWorkingSetLock_nid_postfix();
+void GuestArenaWorkingSetUnlock_nid_postfix();
+// Bounded accounting of file-backed direct memory: libkernel registers each sparse backing file
+// handle it retains; the sum of their allocated (on-disk) sizes is readable from any library.
+void GuestArenaRegisterBackingFile_nid_postfix(void* file);
+void GuestArenaUnregisterBackingFile_nid_postfix(void* file);
+void GuestArenaBackingFileBytes_nid_postfix(std::uint64_t* logical, std::uint64_t* allocated, std::uint32_t* files);
 #else
 void GuestArenaSetSharedBacking_nid_postfix(SharedBackingResolver resolver);
 void GuestArenaSetSharedBackingWriter_nid_no_patch(SharedBackingWriter writer);
@@ -49,6 +59,16 @@ bool GuestArenaBeginHostWrite_nid_postfix(void* pointer, std::size_t bytes);
 void GuestArenaEndHostWrite_nid_postfix(void* pointer, std::size_t bytes);
 
 }
+
+#ifdef _WIN32
+class WorkingSetOwnership {
+public:
+    WorkingSetOwnership() { GuestArenaWorkingSetLock_nid_postfix(); }
+    ~WorkingSetOwnership() { GuestArenaWorkingSetUnlock_nid_postfix(); }
+    WorkingSetOwnership(const WorkingSetOwnership&) = delete;
+    WorkingSetOwnership& operator=(const WorkingSetOwnership&) = delete;
+};
+#endif
 
 class HostWrite {
 public:

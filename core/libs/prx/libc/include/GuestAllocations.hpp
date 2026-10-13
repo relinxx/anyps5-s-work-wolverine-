@@ -20,6 +20,9 @@ struct Range {
     bool releasable = true;
     int sceProtection = -1;
     bool gpu = false;
+    // Stable identity for an allocation lifetime. Protection splits preserve it; reusing an
+    // address gets a new serial so diagnostics cannot inherit the previous owner's history.
+    std::uint64_t registrationSerial = 0;
     bool GpuAccessible() const { return !releasable || sceProtection < 0 || (sceProtection & 0x30) != 0 || (sceProtection & 4) != 0; }
 };
 
@@ -51,6 +54,10 @@ std::uint64_t GuestAllocationsGeneration_nid_postfix();
 // Precise invalidation for such caches: the callback runs, after the generation changed, for every
 // range whose mapping or protection changed (registry mutations and guest heap decommits).
 void GuestAllocationsSetInvalidator_nid_postfix(void (*callback)(std::uintptr_t address, std::size_t bytes));
+// Diagnostic callback for a newly registered owner. Invoked once the identity is assigned; it must
+// not query or mutate the registry. This lets observers capture a lifetime baseline without racing
+// a later protection split or address reuse.
+void GuestAllocationsSetRegistrationObserver_nid_postfix(void (*callback)(std::uintptr_t address, std::size_t bytes, std::uint64_t serial));
 void GuestAllocationsInvalidate_nid_postfix(std::uintptr_t address, std::size_t bytes);
 // A mutation of a range that GPU work still leases waits for the lease (RequireUnpinned). The
 // waiter, set by the GPU driver, is called on the mutating thread with the registry lock released

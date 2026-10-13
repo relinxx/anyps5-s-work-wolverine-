@@ -8,6 +8,7 @@
 #include "CacheKey.hpp"
 #include "prx/libSceAgcDriver/Execution/include/ShaderPreparation.hpp"
 #include "prx/libSceAgcDriver/Execution/include/ShaderPreparationScope.hpp"
+#include "prx/libSceAgcDriver/Execution/include/PreparationQueue.hpp"
 #include "CompiledVariant.hpp"
 #include "Optimization/ResourceProgram.hpp"
 #include <algorithm>
@@ -658,6 +659,20 @@ std::unique_ptr<RegisteredPreparation> PlanRegistered(const ShaderSnapshot& snap
             return defer(reason);
         }
     }
+    // Registration still validates the static header and routing, but opt-in
+    // demand preparation avoids retaining artifacts for shaders never invoked.
+    // Reuse the existing deferred path rather than queueing thousands of tasks:
+    // a bounded queue of work that cannot run until first use could deadlock
+    // registration before the guest can issue its first draw. NullPixel and ABI
+    // preparation pass no deferred flag or registration=false and remain eager.
+    static const bool demand = std::getenv("APS5_DEMAND_REGISTRATION_PREPARE") != nullptr;
+    if (registration && deferred != nullptr && demand && LazyPrepare()) {
+        *deferred = true;
+        static std::atomic<std::uint64_t> count{0};
+        const auto total = count.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (total == 1 || total % 256 == 0) std::fprintf(stderr, "[registration-demand] deferred=%llu; artifacts prepared at ABI resolution or first invocation\n", static_cast<unsigned long long>(total));
+        return nullptr;
+    }
     plan->memory = {{{snapshot.codeAddress, std::as_bytes(std::span(snapshot.code))}, {snapshot.headerAddress, snapshot.header}}};
     auto& request = plan->request.emplace(ShaderRecompiler::RecompileRequest{{stage, address, code, snapshot.headerAddress, snapshot.header}, {wave, firstUser, plan->userData, compute, pixel, vertex, plan->memory, RegisteredFloatMode(snapshot)}, stage == Stage::Compute ? device.ComputeTarget(wave) : device.Target(), {0, 0, 0, 128}, graphics});
     if (graphics && graphics->mesh) request.layout.pushConstantSizeBytes = ShaderRecompiler::MeshDrawPushOffsetBytes;
@@ -689,6 +704,14 @@ std::vector<PreparedShaders::Entry> PrepareRegistered(const ShaderSnapshot& snap
     return plan != nullptr ? PrepareRegistered(*plan) : std::vector<PreparedShaders::Entry>{};
 }
 
+unsigned PreparationLimit(const char* name, unsigned fallback, unsigned maximum) {
+    const auto* text = std::getenv(name);
+    if (text == nullptr || *text == '\0') return fallback;
+    char* end = nullptr;
+    const auto value = std::strtoull(text, &end, 10);
+    return end != text && *end == '\0' && value <= maximum ? static_cast<unsigned>(value) : fallback;
+}
+
 class RegistrationPreparePool {
 public:
     static RegistrationPreparePool& Instance() {
@@ -696,21 +719,22 @@ public:
         return *pool;
     }
 
-    void Submit(std::function<void()> task) {
+    void Submit(std::function<void()> task, std::size_t retainedBytes) {
         if (threads == 0) {
             task();
             return;
         }
-        {
-            std::lock_guard lock(mutex);
-            tasks.push_back(std::move(task));
-        }
-        ready.notify_one();
+        const auto state = tasks.Push(std::move(task), retainedBytes);
+        static const bool trace = std::getenv("APS5_MEMORY_LEDGER") != nullptr;
+        if (trace && (state.submitted % 100 == 0 || state.entries == 1))
+            std::fprintf(stderr, "[prepare-queue] pending=%zu decoded_lower_bound_bytes=%zu workers=%u submitted=%zu\n", state.entries, state.bytes, threads, state.submitted);
     }
 
 private:
-    RegistrationPreparePool() {
-        const auto count = std::max(2u, std::thread::hardware_concurrency() / 2u);
+    RegistrationPreparePool()
+        : tasks(PreparationLimit("APS5_PREPARE_QUEUE_ENTRIES", 0, 4096),
+                static_cast<std::size_t>(PreparationLimit("APS5_PREPARE_QUEUE_MIB", 0, 4096)) << 20u) {
+        const auto count = std::max(1u, PreparationLimit("APS5_PREPARE_WORKERS", std::max(2u, std::thread::hardware_concurrency() / 2u), 64));
         pthread_attr_t attributes;
         pthread_attr_init(&attributes);
         pthread_attr_setstacksize(&attributes, 64u << 20u);
@@ -727,21 +751,13 @@ private:
     static void* Main(void* argument) {
         auto& pool = *static_cast<RegistrationPreparePool*>(argument);
         for (;;) {
-            std::function<void()> task;
-            {
-                std::unique_lock lock(pool.mutex);
-                pool.ready.wait(lock, [&] { return !pool.tasks.empty(); });
-                task = std::move(pool.tasks.front());
-                pool.tasks.pop_front();
-            }
+            auto task = pool.tasks.Pop();
             task();
         }
         return nullptr;
     }
 
-    std::mutex mutex;
-    std::condition_variable ready;
-    std::deque<std::function<void()>> tasks;
+    PreparationQueue tasks;
     unsigned threads = 0;
 };
 
@@ -751,6 +767,7 @@ bool AsyncRegistrationPrepare() {
 }
 
 void PrepareRegisteredInBackground(std::shared_ptr<const ShaderSnapshot> snapshot, std::shared_ptr<RegisteredPreparation> plan) {
+    const auto retainedBytes = plan->decoded.instructions.capacity() * sizeof(ShaderRecompiler::RdnaInstruction) + plan->decoded.ownedCode.capacity() * sizeof(std::uint32_t) + plan->userData.capacity() * sizeof(std::uint32_t) + snapshot->code.capacity() * sizeof(std::uint32_t) + snapshot->header.capacity() * sizeof(snapshot->header[0]);
     RegistrationPreparePool::Instance().Submit([snapshot = std::move(snapshot), plan = std::move(plan)] {
         PerformanceContext timingContext(FrameTiming::Preparation());
         std::vector<PreparedShaders::Entry> entries;
@@ -772,7 +789,7 @@ void PrepareRegisteredInBackground(std::shared_ptr<const ShaderSnapshot> snapsho
             prepared.pending = false;
         }
         prepared.settled.notify_all();
-    });
+    }, retainedBytes);
 }
 
 }
@@ -1203,13 +1220,16 @@ void Driver::RegisterShader(const Shader* shader) {
         std::fprintf(stderr, "\n");
     }
     const auto published = std::make_shared<const ShaderSnapshot>(std::move(snapshot));
-    std::lock_guard lock(mutex);
-    rethrowFailure();
-    PublishRegisteredShader(shaders, published);
-    if (shaders->find(NullPixelProgramAddress()) == shaders->end()) {
-        PublishRegisteredShader(shaders, std::make_shared<const ShaderSnapshot>(PrepareNullPixelProgram(*localDevice)));
+    {
+        std::lock_guard lock(mutex);
+        rethrowFailure();
+        PublishRegisteredShader(shaders, published);
+        if (shaders->find(NullPixelProgramAddress()) == shaders->end()) {
+            PublishRegisteredShader(shaders, std::make_shared<const ShaderSnapshot>(PrepareNullPixelProgram(*localDevice)));
+        }
+        transaction.Commit();
     }
-    transaction.Commit();
+    // Admission may wait for a worker. Do not hold the driver registry lock.
     if (preparation != nullptr) PrepareRegisteredInBackground(published, std::move(preparation));
 }
 

@@ -477,6 +477,9 @@ struct CompiledShaderArtifact {
     std::vector<std::uint32_t> runtimeImageResources;
     std::uint32_t bdaAbiVersion = 0;
     std::uint32_t runtimeAbiVersion = RuntimeAbi::Version;
+    // The program may store through GPU-selected descriptors or FLAT/GLOBAL addresses
+    // (ShaderInfo::bdaWrites): the driver must grant writable heap mirrors in its BDA table.
+    bool bdaWrites = false;
     std::vector<VertexInput> vertexInputs;
     std::int32_t vertexOffsetSgpr = -1;
     std::int32_t instanceOffsetSgpr = -1;

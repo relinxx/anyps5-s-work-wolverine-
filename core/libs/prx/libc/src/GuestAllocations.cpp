@@ -43,8 +43,12 @@ Registry& registry() {
 }
 
 std::atomic<std::uint64_t> generation{1};
+std::atomic<std::uint64_t> nextRegistrationSerial{1};
 std::atomic<void (*)(std::uintptr_t, std::size_t)> invalidator{nullptr};
+std::atomic<void (*)(std::uintptr_t, std::size_t, std::uint64_t)> registrationObserver{nullptr};
 std::atomic<bool (*)(std::uintptr_t, std::size_t)> pinWaiter{nullptr};
+std::mutex observerMutex;
+std::vector<void (*)(std::uintptr_t, std::size_t)> observers;
 
 std::chrono::milliseconds pinWait() {
     static const std::chrono::milliseconds value{[] {
@@ -68,6 +72,13 @@ struct MutationState {
 
 void recordChange(void* mutation, const void* pointer, std::size_t bytes) {
     if (mutation != nullptr && bytes != 0) static_cast<MutationState*>(mutation)->changed.emplace_back(reinterpret_cast<std::uintptr_t>(pointer), bytes);
+}
+
+void notifyRegistration(const Range& range) noexcept {
+    if (const auto callback = registrationObserver.load(std::memory_order_acquire)) {
+        try { callback(range.allocationAddress, range.allocationBytes, range.registrationSerial); }
+        catch (...) { /* diagnostics must never fail guest allocation registration */ }
+    }
 }
 
 #ifndef _WIN32
@@ -125,6 +136,10 @@ void GuestAllocationsSetInvalidator_nid_postfix(void (*callback)(std::uintptr_t,
     invalidator.store(callback, std::memory_order_release);
 }
 
+void GuestAllocationsSetRegistrationObserver_nid_postfix(void (*callback)(std::uintptr_t, std::size_t, std::uint64_t)) {
+    registrationObserver.store(callback, std::memory_order_release);
+}
+
 void GuestAllocationsInvalidate_nid_postfix(std::uintptr_t address, std::size_t bytes) {
     generation.fetch_add(1, std::memory_order_release);
     if (const auto callback = invalidator.load(std::memory_order_acquire)) callback(address, bytes);
@@ -160,7 +175,9 @@ void registerImage(const void* image) {
                 const auto& previous = *std::prev(next)->second;
                 require(previous.address + previous.bytes <= cursor, "guest image overlaps a registered allocation");
             }
-            replacement.emplace(cursor, std::make_shared<const Range>(Range{cursor, memory.RegionSize, readable, writable, cursor, memory.RegionSize, false}));
+            auto range = std::make_shared<const Range>(Range{cursor, memory.RegionSize, readable, writable, cursor, memory.RegionSize, false, -1, false, nextRegistrationSerial.fetch_add(1, std::memory_order_relaxed)});
+            replacement.emplace(cursor, range);
+            notifyRegistration(*range);
             registered = true;
         }
         cursor += memory.RegionSize;
@@ -234,7 +251,9 @@ void GuestAllocationsRegisterMainImage_nid_postfix(void*) {
             const auto& previous = *std::prev(next)->second;
             require(previous.address + previous.bytes <= address, "guest image overlaps a registered allocation");
         }
-        replacement.emplace(address, std::make_shared<const Range>(Range{address, bytes, page->second.readable, page->second.writable, address, bytes, false}));
+        auto range = std::make_shared<const Range>(Range{address, bytes, page->second.readable, page->second.writable, address, bytes, false, -1, false, nextRegistrationSerial.fetch_add(1, std::memory_order_relaxed)});
+        replacement.emplace(address, range);
+        notifyRegistration(*range);
         page = std::next(last);
     }
     state.ranges.swap(replacement);
@@ -256,7 +275,9 @@ void addRange(void* mutation, void* pointer, std::size_t bytes, bool readable, b
         const auto& previous = *std::prev(next)->second;
         require(previous.address + previous.bytes <= address, "overlapping guest allocation");
     }
-    ranges.emplace(address, std::make_shared<const Range>(Range{address, bytes, readable, writable, address, bytes, releasable, sceProtection, gpu}));
+    auto range = std::make_shared<const Range>(Range{address, bytes, readable, writable, address, bytes, releasable, sceProtection, gpu, nextRegistrationSerial.fetch_add(1, std::memory_order_relaxed)});
+    ranges.emplace(address, range);
+    notifyRegistration(*range);
 }
 
 }
@@ -367,7 +388,7 @@ Range GuestAllocationsFind_nid_postfix(void*, const void* pointer) {
     if (exact != registry().ranges.end() && exact->second->allocationAddress == address && exact->second->allocationBytes == exact->second->bytes) {
         const auto& range = *exact->second;
         require(range.releasable, "guest image memory is not a releasable allocation");
-        return {address, range.allocationBytes, range.readable, range.writable, address, range.allocationBytes, range.releasable, range.sceProtection, range.gpu};
+        return {address, range.allocationBytes, range.readable, range.writable, address, range.allocationBytes, range.releasable, range.sceProtection, range.gpu, range.registrationSerial};
     }
     for (const auto& [base, range] : registry().ranges) {
         if (range->allocationAddress == address) {
@@ -408,7 +429,7 @@ std::map<std::uint64_t, std::shared_ptr<const Range>> replaceRange(const void* p
         require(base <= cursor, "guest protection or unmap range has a hole");
         replacement.erase(base);
         const auto insert = [&](std::uint64_t first, std::uint64_t last, bool canRead, bool canWrite, int protection, bool gpuMapped) {
-            if (first < last) replacement.emplace(first, std::make_shared<const Range>(Range{first, static_cast<std::size_t>(last - first), canRead, canWrite, range.allocationAddress, range.allocationBytes, range.releasable, protection, gpuMapped}));
+            if (first < last) replacement.emplace(first, std::make_shared<const Range>(Range{first, static_cast<std::size_t>(last - first), canRead, canWrite, range.allocationAddress, range.allocationBytes, range.releasable, protection, gpuMapped, range.registrationSerial}));
         };
         insert(base, std::max(base, address), range.readable, range.writable, range.sceProtection, range.gpu);
         if (!remove) insert(std::max(base, address), std::min(finish, end), readable, writable, sceProtection < 0 ? range.sceProtection : sceProtection, gpu);

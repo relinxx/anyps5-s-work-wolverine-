@@ -1,4 +1,5 @@
 #include <cstdint>
+#include "prx/libc/include/GuestArena.hpp"
 #include <cstddef>
 #include <cstring>
 #include "SceTypes.hpp"
@@ -489,6 +490,9 @@ int LockHostPages(std::uintptr_t start, std::uintptr_t end) {
     auto* const address = reinterpret_cast<void*>(start);
     const SIZE_T bytes = end - start;
     std::lock_guard lock(g_workingSetLock);
+    // Shared with the driver's source-page trim, which queries lock state and then unlocks: holding
+    // it here means no lock can land between that query and its VirtualUnlock.
+    const GuestArena::WorkingSetOwnership ownership;
     if (VirtualLock(address, bytes)) return 0;
     if (GetLastError() != ERROR_WORKING_SET_QUOTA) throw std::system_error(static_cast<int>(GetLastError()), std::system_category(), "VirtualLock failed");
     SIZE_T minimum = 0;
